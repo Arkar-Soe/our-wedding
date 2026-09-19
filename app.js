@@ -5,6 +5,81 @@ const guests = new Map(), calls = new Map(), tiles = new Map();
 let stream, peer, hostConnection, token, ownName, selfId, hostId, roomLink;
 let active = false, busy = false, isHost = false, epoch = 0, roster = [], ticker, repair;
 let selectedVideo = null;
+let cameraSwitch = null;
+function cameraFeedback(text) { $('camera-feedback').textContent = text; }
+function cameraControls() {
+  const video = stream?.getVideoTracks()[0];
+  $('call-camera').disabled = !active || !video || !!cameraSwitch;
+  $('flip-camera').disabled = $('call-camera').disabled || $('call-camera').options.length < 2;
+  $('toggle-video').disabled = !video || !!cameraSwitch;
+}
+function mirrorCamera() {
+  const track = stream?.getVideoTracks()[0];
+  const rear = track?.getSettings().facingMode === 'environment' || /back|rear|environment/i.test(track?.label || '');
+  $('local-video').style.transform = rear ? 'none' : 'scaleX(-1)';
+  $('preview').style.transform = rear ? 'none' : 'scaleX(-1)';
+}
+async function refreshCallCameras() {
+  const generation = epoch;
+  try {
+    const list = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput' && d.deviceId);
+    if (!active || epoch !== generation) return;
+    const current = stream?.getVideoTracks()[0]?.getSettings().deviceId;
+    $('call-camera').replaceChildren();
+    for (const [i, device] of list.entries()) $('call-camera').add(new Option(device.label || `Camera ${i + 1}`, device.deviceId));
+    if (current && !list.some(d => d.deviceId === current)) $('call-camera').add(new Option('Current camera', current));
+    if (!$('call-camera').options.length) $('call-camera').add(new Option('Current camera', ''));
+    if (current) $('call-camera').value = current;
+  } catch { if (active && epoch === generation) cameraFeedback('Camera list unavailable. Check camera permissions.'); }
+  cameraControls();
+}
+async function changeCamera(deviceId) {
+  const old = stream?.getVideoTracks()[0];
+  if (!active || !old || cameraSwitch || !deviceId) return;
+  if (old.getSettings().deviceId === deviceId && old.readyState === 'live') return;
+  const generation = epoch, currentStream = stream, operation = {};
+  cameraSwitch = operation; cameraControls(); cameraFeedback('Switching camera…');
+  let acquired, next;
+  const targets = [];
+  try {
+    const h = Number($('quality').value);
+    acquired = await navigator.mediaDevices.getUserMedia({audio:false, video:{deviceId:{exact:deviceId}, width:{ideal:Math.round(h*16/9)}, height:{ideal:h}, frameRate:{ideal:24,max:30}}});
+    next = acquired.getVideoTracks()[0];
+    if (!next) throw new Error('NO_CAMERA');
+    if (!active || epoch !== generation) return;
+    next.enabled = old.enabled;
+    for (const [id, call] of calls) {
+      const sender = call.peerConnection?.getSenders().find(s => s.track?.kind === 'video');
+      if (sender) targets.push({id, call, sender});
+    }
+    const results = await Promise.allSettled(targets.map(t => t.sender.replaceTrack(next)));
+    if (!active || epoch !== generation) return;
+    if (results.some(r => r.status === 'rejected')) {
+      const restored = await Promise.allSettled(targets.map(t => t.sender.replaceTrack(old)));
+      if (!active || epoch !== generation) return;
+      restored.forEach((r,i) => {if (r.status === 'rejected' && calls.get(targets[i].id) === targets[i].call) closeCall(targets[i].id);});
+      throw new Error('REPLACE_FAILED');
+    }
+    currentStream.removeTrack(old); currentStream.addTrack(next);
+    $('local-video').srcObject = currentStream; $('preview').srcObject = currentStream;
+    old.stop(); acquired = null;
+    mirrorCamera();
+    $('local-video').play().catch(() => {});
+    if ([...$('camera').options].some(o => o.value === deviceId)) $('camera').value = deviceId;
+    cameraFeedback(next.enabled ? 'Camera changed.' : 'Camera changed. Your camera is still off.');
+  } catch (error) {
+    if (active && epoch === generation) cameraFeedback(error.name === 'NotAllowedError'
+      ? 'Camera permission denied. Your previous camera is unchanged.'
+      : 'Could not switch cameras. Your previous camera is kept; try another camera or close other camera apps.');
+  } finally {
+    acquired?.getTracks().forEach(t => t.stop());
+    if (cameraSwitch === operation) {
+      cameraSwitch = null;
+      if (active && epoch === generation) { await refreshCallCameras(); reconcile(); }
+      cameraControls();
+    }
+  }
+}
 function videoEntries() { return [['local', $('local-tile')], ...tiles.entries()]; }
 function arrangeVideos() {
   const entries = videoEntries();
@@ -110,7 +185,7 @@ function render() {
   arrangeVideos();
 }
 function reconcile() {
-  if (!active || !peer || peer.destroyed || peer.disconnected) return;
+  if (!active || cameraSwitch || !peer || peer.destroyed || peer.disconnected) return;
   for (const m of roster) if (selfId < m.id && !calls.has(m.id)) {
     try {const c = peer.call(m.id, stream, {metadata: {room: token}}); if (c) attach(c);} catch {status('Retrying a family connection…');}
   }
@@ -151,6 +226,8 @@ function enter() {
   $('toggle-mic').textContent = 'Mute microphone'; $('toggle-mic').setAttribute('aria-pressed', 'false');
   $('toggle-video').textContent = stream.getVideoTracks().length ? 'Turn camera off' : 'Voice only';
   $('toggle-video').disabled = !stream.getVideoTracks().length; $('toggle-video').setAttribute('aria-pressed', 'false');
+  mirrorCamera(); cameraFeedback(stream.getVideoTracks().length ? '' : 'Voice-only call. Rejoin with video to enable a camera.');
+  cameraControls(); void refreshCallCameras();
   $('invitation').value = roomLink; $('messages').replaceChildren(); message('', 'Welcome to our wedding. Chat is not saved after you leave.', true);
   const start = Date.now(); $('elapsed').textContent = '00:00:00';
   ticker = setInterval(() => {const s = Math.floor((Date.now() - start) / 1000); $('elapsed').textContent = [Math.floor(s/3600), Math.floor(s/60)%60, s%60].map(n => String(n).padStart(2,'0')).join(':');}, 1000);
@@ -221,6 +298,7 @@ async function start() {
     peer.on('connection', acceptGuest);
     peer.on('call', c => {
       const accept = () => {
+        if (epoch === generation && active && cameraSwitch) {setTimeout(accept, 200); return;}
         if (epoch !== generation || !active || c.metadata?.room !== token || !roster.some(m => m.id === c.peer) || calls.has(c.peer)) {c.close(); return;}
         attach(c); c.answer(stream);
       };
@@ -240,7 +318,7 @@ async function start() {
 function end(reason = 'You’ve left the call. Thank you for being part of our beginning.', error = false) {
   void exitStage(); document.body.classList.remove('in-call'); selectedVideo = null;
   if (isHost && active) broadcast({type:'ended'});
-  ++epoch; active = false; busy = false; clearInterval(ticker); clearInterval(repair);
+  ++epoch; active = false; busy = false; cameraSwitch = null; clearInterval(ticker); clearInterval(repair);
   const oldCalls = [...calls.values()]; calls.clear(); oldCalls.forEach(c => c.close());
   guests.clear(); roster = []; peer?.destroy(); peer = null; hostConnection = null; stopMedia();
   for (const tile of tiles.values()) tile.remove(); tiles.clear();
@@ -248,6 +326,14 @@ function end(reason = 'You’ve left the call. Thank you for being part of our b
   $('play-audio').hidden = true; $('messages').replaceChildren(); lobby(); status(reason,error);
 }
 $('join').addEventListener('click', start);
+$('call-camera').addEventListener('change', () => {void changeCamera($('call-camera').value);});
+$('flip-camera').addEventListener('click', () => {
+  const options = [...$('call-camera').options];
+  if (options.length < 2) return;
+  const index = options.findIndex(o => o.value === stream?.getVideoTracks()[0]?.getSettings().deviceId);
+  void changeCamera(options[(index + 1) % options.length].value);
+});
+navigator.mediaDevices?.addEventListener('devicechange', () => {if (active && !cameraSwitch) void refreshCallCameras();});
 $('local-tile').querySelector('.tile-select').addEventListener('click', () => selectVideo('local'));
 $('swap-video').addEventListener('click', () => {
   const ids = videoEntries().map(([id]) => id);

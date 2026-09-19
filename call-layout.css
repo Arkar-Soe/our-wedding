@@ -1,4 +1,12 @@
 /* Keep the existing media elements mounted while changing their layout. */
+.camera-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 14px;background:#1e3025;flex-shrink:0;border-top:1px solid #ffffff12}
+.camera-tools label{font-size:13px;margin:0}
+.camera-tools select{flex:1;min-width:100px;max-width:300px;background:#273e2e;color:white;border-color:#ffffff35;font-size:13px}
+.camera-tools option{background:#273e2e;color:white}
+.camera-tools #camera-feedback{flex-basis:100%;font-size:12px;color:#e6d6b5}
+.camera-tools #camera-feedback:empty{display:none}
+.camera-tools .control:disabled,.camera-tools select:disabled{opacity:.5;cursor:default}
+@media(max-width:600px){.camera-tools{gap:7px;padding:8px 10px}.camera-tools label{font-size:12px}.camera-tools select{font-size:12px;max-width:none;width:0}.camera-tools .control{font-size:12px}}
 .in-call .hero{display:none}
 .in-call main{max-width:1500px}
 .in-call .status{margin:12px auto}
