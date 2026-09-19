@@ -5,6 +5,27 @@ const guests = new Map(), calls = new Map(), tiles = new Map();
 let stream, peer, hostConnection, token, ownName, selfId, hostId, roomLink;
 let active = false, busy = false, isHost = false, epoch = 0, roster = [], ticker, repair;
 let selectedVideo = null;
+let chromeTimer = null;
+function setCallChrome(visible) {
+  const stage = $('call-stage');
+  const hide = stage.classList.contains('full-view') && !visible;
+  stage.classList.toggle('chrome-hidden', hide);
+  stage.querySelectorAll('.stage-actions, .controls, .tile-select').forEach(el => {el.inert = hide;});
+  if (hide && stage.contains(document.activeElement) && document.activeElement !== stage) stage.focus({preventScroll:true});
+}
+function revealCallChrome() {
+  clearTimeout(chromeTimer); setCallChrome(true);
+  if ($('call-stage').classList.contains('full-view') && $('camera-menu').hidden) {
+    chromeTimer = setTimeout(() => setCallChrome(false), 3000);
+  }
+}
+function toggleCameraMenu(open, returnFocus = false) {
+  $('camera-menu').hidden = !open;
+  $('more-options').setAttribute('aria-expanded', String(open));
+  revealCallChrome();
+  if (open) {$('close-camera-menu').focus(); void refreshCallCameras();}
+  else if (returnFocus) $('more-options').focus();
+}
 let cameraSwitch = null;
 function cameraFeedback(text) { $('camera-feedback').textContent = text; }
 function cameraControls() {
@@ -104,6 +125,8 @@ function syncFullscreen() {
   $('fullscreen').textContent = on ? 'Exit full screen' : 'Full screen';
   $('fullscreen').setAttribute('aria-pressed', String(on));
   document.body.classList.toggle('stage-expanded', on);
+  $('call-stage').classList.toggle('full-view', on);
+  revealCallChrome();
 }
 async function exitStage() {
   $('call-stage').classList.remove('expanded');
@@ -316,6 +339,7 @@ async function start() {
   } catch (e) {end(mediaError(e),true);} finally {$('preview-button').disabled = busy;}
 }
 function end(reason = 'You’ve left the call. Thank you for being part of our beginning.', error = false) {
+  toggleCameraMenu(false); clearTimeout(chromeTimer);
   void exitStage(); document.body.classList.remove('in-call'); selectedVideo = null;
   if (isHost && active) broadcast({type:'ended'});
   ++epoch; active = false; busy = false; cameraSwitch = null; clearInterval(ticker); clearInterval(repair);
@@ -326,6 +350,25 @@ function end(reason = 'You’ve left the call. Thank you for being part of our b
   $('play-audio').hidden = true; $('messages').replaceChildren(); lobby(); status(reason,error);
 }
 $('join').addEventListener('click', start);
+$('more-options').addEventListener('click', () => toggleCameraMenu($('camera-menu').hidden));
+$('close-camera-menu').addEventListener('click', () => toggleCameraMenu(false, true));
+$('call-stage').addEventListener('pointerdown', event => {
+  if ($('call-stage').classList.contains('chrome-hidden')) {
+    event.preventDefault(); event.stopImmediatePropagation();
+    revealCallChrome(); return;
+  }
+  if (!$('camera-menu').hidden && !event.target.closest('#camera-menu, #more-options')) toggleCameraMenu(false);
+  revealCallChrome();
+}, true);
+$('call-stage').addEventListener('pointermove', event => {
+  if (event.pointerType === 'touch') return;
+  const rect = $('call-stage').getBoundingClientRect();
+  if (event.clientY - rect.top < 100 || rect.bottom - event.clientY < 120) revealCallChrome();
+});
+$('call-stage').addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !$('camera-menu').hidden) {event.preventDefault();event.stopPropagation();toggleCameraMenu(false,true);return;}
+  revealCallChrome();
+});
 $('call-camera').addEventListener('change', () => {void changeCamera($('call-camera').value);});
 $('flip-camera').addEventListener('click', () => {
   const options = [...$('call-camera').options];
