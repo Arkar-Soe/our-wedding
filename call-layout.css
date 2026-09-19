@@ -1,0 +1,41 @@
+/* Keep the existing media elements mounted while changing their layout. */
+.in-call .hero{display:none}
+.in-call main{max-width:1500px}
+.in-call .status{margin:12px auto}
+.in-call .call-layout{grid-template-columns:minmax(0,1fr) 285px}
+.in-call .chat .messages{min-height:0}
+.in-call .chat .chat-header,.in-call .chat form{flex-shrink:0}
+.call-stage .overlay-video .tile-backdrop{font-size:23px}
+.call-stage{background:#14211a;color:#fff;border:1px solid #344b3d;border-radius:14px;overflow:hidden;display:flex;flex-direction:column;position:relative;isolation:isolate}
+.stage-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;background:#1e3025;flex-shrink:0;font-size:13px}
+.stage-toolbar>div{display:flex;gap:8px}
+.stage-toolbar button{background:#ffffff12;color:#fff;border:1px solid #ffffff30;border-radius:7px;padding:10px 13px;min-height:42px;font-size:13px}
+.stage-toolbar button:hover{background:#ffffff25}
+.stage-toolbar button:disabled{cursor:default}
+.call-stage .video-grid{display:block;position:relative;aspect-ratio:16/10;min-height:360px;flex:1;overflow:hidden;background:#101912}
+.call-stage .video-tile{position:absolute;margin:0;aspect-ratio:auto}
+.call-stage .video-tile.main-video{inset:0;width:100%;height:100%;border-radius:0;z-index:1;aspect-ratio:auto}
+.call-stage .main-video video{object-fit:contain}
+.call-stage .overlay-video{width:clamp(120px,23%,220px);height:auto;aspect-ratio:4/3;right:16px;top:calc(16px + var(--overlay-index) * (min(23vw,165px) + 16px));z-index:3;border:2px solid #ffffffa6;border-radius:10px;box-shadow:0 6px 25px #0007;background:#283c2f}
+.call-stage .overlay-video:nth-of-type(n){top:auto;bottom:calc(16px + var(--overlay-index) * (var(--pip-height,145px) + 12px));height:var(--pip-height,145px);aspect-ratio:auto}
+.call-stage .overlay-video video{object-fit:cover}
+.call-stage .tile-label{font-size:12px;max-width:calc(100% - 20px);width:max-content;pointer-events:none}
+.call-stage .overlay-video .tile-label{font-size:11px;left:6px;bottom:6px;padding:5px 7px;max-width:calc(100% - 12px)}
+.tile-select{position:absolute;inset:0;z-index:4;border:0;background:transparent;color:white;text-align:left;border-radius:inherit}
+.tile-select span{position:absolute;top:7px;left:7px;background:#14251fe6;border-radius:4px;font-size:11px;padding:5px 7px}
+.tile-select:hover{box-shadow:inset 0 0 0 2px #dec591}
+.tile-select:focus-visible{outline:3px solid #e7c57e;outline-offset:-4px}
+.call-stage .controls{padding:13px 12px;margin:0;flex-shrink:0;background:#1e3025;border-top:1px solid #ffffff12}
+.call-stage .control,.call-stage .leave{font-size:13px;min-height:44px;padding:12px 15px}
+.call-stage .control{background:#ffffff10;color:#fff;border-color:#ffffff25}
+.call-stage .control[aria-pressed=true]{background:#775e34}
+.call-stage:fullscreen,.call-stage.expanded{width:100%;height:100dvh;max-width:none;max-height:none;border:0;border-radius:0;--pip-height:clamp(110px,21vh,190px)}
+.call-stage:-webkit-full-screen{width:100%;height:100%;border:0;border-radius:0;--pip-height:clamp(110px,21vh,190px)}
+.call-stage.expanded{position:fixed;inset:0;z-index:9999}
+.stage-expanded{overflow:hidden}
+.call-stage:fullscreen .video-grid,.call-stage.expanded .video-grid{aspect-ratio:auto;min-height:0}
+.call-stage:-webkit-full-screen .video-grid{aspect-ratio:auto;min-height:0}
+.call-stage:fullscreen .controls,.call-stage.expanded .controls{padding-bottom:max(13px,env(safe-area-inset-bottom))}
+@media(max-width:1000px){.in-call .call-layout{grid-template-columns:1fr}.call-stage{--pip-height:130px}.in-call .chat{max-height:330px;min-height:280px}}
+@media(max-width:600px){.stage-toolbar{padding:10px;gap:6px}.stage-toolbar>span{font-size:11px;max-width:100px}.stage-toolbar button{font-size:12px;padding:8px 10px}.call-stage{--pip-height:100px}.call-stage .video-grid{aspect-ratio:3/4;min-height:340px}.call-stage .overlay-video{width:125px;right:10px}.call-stage .overlay-video:nth-of-type(n){bottom:calc(10px + var(--overlay-index) * (var(--pip-height,100px) + 10px))}.call-stage .control,.call-stage .leave{font-size:12px;padding:10px;min-height:44px}.call-stage .controls{gap:6px}.in-call .room-heading h2{font-size:28px}}
+@media(max-height:500px) and (orientation:landscape){.call-stage:fullscreen,.call-stage.expanded{--pip-height:80px}.call-stage .overlay-video{width:115px}.call-stage .controls{padding:6px}.stage-toolbar{padding:5px 12px}.stage-toolbar button{min-height:34px;padding:6px 10px}.call-stage .control,.call-stage .leave{min-height:36px;padding:7px 12px}}

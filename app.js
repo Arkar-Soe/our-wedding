@@ -4,6 +4,42 @@ const $ = id => document.getElementById(id);
 const guests = new Map(), calls = new Map(), tiles = new Map();
 let stream, peer, hostConnection, token, ownName, selfId, hostId, roomLink;
 let active = false, busy = false, isHost = false, epoch = 0, roster = [], ticker, repair;
+let selectedVideo = null;
+function videoEntries() { return [['local', $('local-tile')], ...tiles.entries()]; }
+function arrangeVideos() {
+  const entries = videoEntries();
+  if (!entries.some(([id]) => id === selectedVideo)) selectedVideo = tiles.keys().next().value || 'local';
+  // On first arrival, show the family large unless the user has chosen a view.
+  const main = selectedVideo || 'local';
+  let overlay = 0;
+  for (const [id, tile] of entries) {
+    const primary = id === main;
+    tile.classList.toggle('main-video', primary);
+    tile.classList.toggle('overlay-video', !primary);
+    tile.style.setProperty('--overlay-index', primary ? 0 : overlay++);
+    const button = tile.querySelector('.tile-select');
+    if (button) { button.hidden = primary; button.tabIndex = primary ? -1 : 0; }
+  }
+  $('swap-video').disabled = entries.length < 2;
+}
+function selectVideo(id) { selectedVideo = id; arrangeVideos(); }
+function fullScreenElement() { return document.fullscreenElement || document.webkitFullscreenElement; }
+function syncFullscreen() {
+  const on = fullScreenElement() === $('call-stage') || $('call-stage').classList.contains('expanded');
+  $('fullscreen').textContent = on ? 'Exit full screen' : 'Full screen';
+  $('fullscreen').setAttribute('aria-pressed', String(on));
+  document.body.classList.toggle('stage-expanded', on);
+}
+async function exitStage() {
+  $('call-stage').classList.remove('expanded');
+  try {
+    if (fullScreenElement() === $('call-stage')) {
+      if (document.exitFullscreen) await document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+  } catch { /* The browser may already have exited fullscreen. */ }
+  syncFullscreen();
+}
 const status = (text, error = false) => { $('status').textContent = text; $('status').classList.toggle('error', error); };
 const cleanName = value => typeof value === 'string' ? value.trim().slice(0, 40) || 'Family' : 'Family';
 function invitation() { const v = new URLSearchParams(location.hash.slice(1)).get('room'); return /^[a-f0-9]{48}$/.test(v || '') ? v : ''; }
@@ -60,12 +96,18 @@ function render() {
       const back = document.createElement('div'); back.className = 'tile-backdrop'; back.textContent = 'Together';
       const video = document.createElement('video'); video.autoplay = true; video.playsInline = true;
       const label = document.createElement('div'); label.className = 'tile-label';
-      tile.append(back, video, label); tiles.set(m.id, tile); $('videos').append(tile);
+      const choose = document.createElement('button'); choose.type = 'button'; choose.className = 'tile-select';
+      choose.setAttribute('aria-label', `Show ${m.name} in the main view`);
+      const hint = document.createElement('span'); hint.textContent = 'Show large ↗'; choose.append(hint);
+      choose.addEventListener('click', () => selectVideo(m.id));
+      if (!tiles.size && selectedVideo === 'local') selectedVideo = null;
+      tile.append(back, video, label, choose); tiles.set(m.id, tile); $('videos').append(tile);
     }
     const tile = tiles.get(m.id);
     tile.querySelector('.tile-label').textContent = m.name + (tile.querySelector('video').srcObject ? ' · Connected' : ' · Connecting…');
   }
   $('people-count').textContent = `${roster.length} / 3 devices`; $('waiting').hidden = roster.length > 1;
+  arrangeVideos();
 }
 function reconcile() {
   if (!active || !peer || peer.destroyed || peer.disconnected) return;
@@ -102,6 +144,7 @@ function publishRoster() {
   broadcast({type: 'roster', members: roster}); render(); reconcile();
 }
 function enter() {
+  document.body.classList.add('in-call'); selectedVideo = null;
   active = true; busy = false; $('lobby').hidden = true; $('call-room').hidden = false; $('join').disabled = false;
   $('local-video').srcObject = stream; $('local-video').play().catch(() => {});
   $('local-label').textContent = `${ownName} · You${isHost ? ' · Host' : ''}`;
@@ -195,6 +238,7 @@ async function start() {
   } catch (e) {end(mediaError(e),true);} finally {$('preview-button').disabled = busy;}
 }
 function end(reason = 'You’ve left the call. Thank you for being part of our beginning.', error = false) {
+  void exitStage(); document.body.classList.remove('in-call'); selectedVideo = null;
   if (isHost && active) broadcast({type:'ended'});
   ++epoch; active = false; busy = false; clearInterval(ticker); clearInterval(repair);
   const oldCalls = [...calls.values()]; calls.clear(); oldCalls.forEach(c => c.close());
@@ -204,6 +248,26 @@ function end(reason = 'You’ve left the call. Thank you for being part of our b
   $('play-audio').hidden = true; $('messages').replaceChildren(); lobby(); status(reason,error);
 }
 $('join').addEventListener('click', start);
+$('local-tile').querySelector('.tile-select').addEventListener('click', () => selectVideo('local'));
+$('swap-video').addEventListener('click', () => {
+  const ids = videoEntries().map(([id]) => id);
+  selectVideo(ids[(ids.indexOf(selectedVideo) + 1) % ids.length]);
+});
+$('fullscreen').addEventListener('click', async () => {
+  const stage = $('call-stage');
+  if (fullScreenElement() === stage || stage.classList.contains('expanded')) { await exitStage(); return; }
+  try {
+    if (stage.requestFullscreen) await stage.requestFullscreen();
+    else if (stage.webkitRequestFullscreen) stage.webkitRequestFullscreen();
+    else stage.classList.add('expanded');
+  } catch { stage.classList.add('expanded'); }
+  syncFullscreen();
+});
+document.addEventListener('fullscreenchange', syncFullscreen);
+document.addEventListener('webkitfullscreenchange', syncFullscreen);
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && $('call-stage').classList.contains('expanded')) { void exitStage(); $('fullscreen').focus(); }
+});
 $('preview-button').addEventListener('click', async () => {
   $('preview-button').disabled = true; $('join').disabled = true;
   try {await capture(); status('Preview ready. Your microphone is available; its sound is not played back here.');}
