@@ -2,22 +2,56 @@
 // Public signaling + STUN. No paid service or TURN relay is configured.
 const $ = id => document.getElementById(id);
 const guests = new Map(), calls = new Map(), tiles = new Map();
+const MAX_PARTICIPANTS = 8;
+let layoutMode = "gallery", openPanel = null, unreadMessages = 0;
+let qualityQueue = Promise.resolve(), lastQualityProfile = "";
 let stream, peer, hostConnection, token, ownName, selfId, hostId, roomLink;
 let active = false, busy = false, isHost = false, epoch = 0, roster = [], ticker, repair;
 let selectedVideo = null;
+let noticeTimer = null, inviteLabelTimer = null;
+function placeNotifications() {
+  const region = $('notification-region');
+  const target = $('call-stage').classList.contains('full-view') ? $('call-stage') : document.body;
+  if (region.parentElement !== target) target.append(region);
+}
+function notify(text, {kind = 'success', detail = '', manualLink = '', duration = 3600} = {}) {
+  clearTimeout(noticeTimer); placeNotifications();
+  const region = $('notification-region'), card = document.createElement('div'), icon = document.createElement('span'), body = document.createElement('div'), title = document.createElement('strong');
+  card.className = 'notification-card'; card.dataset.kind = kind;
+  icon.className = 'notification-icon'; icon.textContent = kind === 'error' ? '!' : kind === 'info' ? 'i' : '✓'; icon.setAttribute('aria-hidden','true');
+  body.className = 'notification-body'; title.textContent = text; body.append(title);
+  if (detail) {const p = document.createElement('p'); p.textContent = detail; body.append(p);}
+  if (manualLink) {
+    const input = document.createElement('input'); input.id = 'manual-invitation'; input.readOnly = true; input.value = manualLink; input.setAttribute('aria-label','Invitation link to copy manually'); body.append(input);
+    const dismiss = document.createElement('button'); dismiss.type = 'button'; dismiss.className = 'notification-dismiss'; dismiss.textContent = '×'; dismiss.setAttribute('aria-label','Dismiss notification'); dismiss.addEventListener('click',()=>{region.hidden=true;}); card.append(dismiss);
+  }
+  card.prepend(icon, body); region.replaceChildren(card); region.hidden = false;
+  if (duration > 0) noticeTimer = setTimeout(()=>{region.hidden=true;},duration);
+  if (manualLink) {const input = $('manual-invitation'); input.focus({preventScroll:true}); input.select();}
+}
 let chromeTimer = null;
+let chromePointerInside = false, suppressRevealClickUntil = 0;
 function setCallChrome(visible) {
   const stage = $('call-stage');
   const hide = stage.classList.contains('full-view') && !visible;
   stage.classList.toggle('chrome-hidden', hide);
   stage.querySelectorAll('.stage-actions, .controls, .tile-select').forEach(el => {el.inert = hide;});
-  if (hide && stage.contains(document.activeElement) && document.activeElement !== stage) stage.focus({preventScroll:true});
+  if (hide && stage.querySelector('.stage-actions, .controls') &&
+      document.activeElement?.closest('.stage-actions, .controls, .tile-select')) stage.focus({preventScroll:true});
 }
-function revealCallChrome() {
-  clearTimeout(chromeTimer); setCallChrome(true);
-  if ($('call-stage').classList.contains('full-view') && $('camera-menu').hidden) {
+function scheduleChromeHide() {
+  clearTimeout(chromeTimer);
+  if ($('call-stage').classList.contains('full-view') && $('camera-menu').hidden && !openPanel && !chromePointerInside) {
     chromeTimer = setTimeout(() => setCallChrome(false), 3000);
   }
+}
+function revealCallChrome() {setCallChrome(true); scheduleChromeHide();}
+function pointerAtControls(event) {
+  return [...$('call-stage').querySelectorAll('.stage-actions, .controls')].some(el => {
+    const r = el.getBoundingClientRect(), padding = 12;
+    return event.clientX >= r.left-padding && event.clientX <= r.right+padding &&
+      event.clientY >= r.top-padding && event.clientY <= r.bottom+padding;
+  });
 }
 function toggleCameraMenu(open, returnFocus = false) {
   $('camera-menu').hidden = !open;
@@ -27,7 +61,7 @@ function toggleCameraMenu(open, returnFocus = false) {
   else if (returnFocus) $('more-options').focus();
 }
 let cameraSwitch = null;
-function cameraFeedback(text) { $('camera-feedback').textContent = text; }
+function cameraFeedback(text) { $('camera-feedback').textContent = text; if (/^Camera changed/.test(text)) notify(text); else if (/^Could not|^Camera permission denied|^Camera list unavailable/.test(text)) notify(text,{kind:'error',duration:6500}); }
 function cameraControls() {
   const video = stream?.getVideoTracks()[0];
   $('call-camera').disabled = !active || !video || !!cameraSwitch;
@@ -63,7 +97,7 @@ async function changeCamera(deviceId) {
   let acquired, next;
   const targets = [];
   try {
-    const h = Number($('quality').value);
+    const h = videoProfile().height;
     acquired = await navigator.mediaDevices.getUserMedia({audio:false, video:{deviceId:{exact:deviceId}, width:{ideal:Math.round(h*16/9)}, height:{ideal:h}, frameRate:{ideal:24,max:30}}});
     next = acquired.getVideoTracks()[0];
     if (!next) throw new Error('NO_CAMERA');
@@ -96,7 +130,7 @@ async function changeCamera(deviceId) {
     acquired?.getTracks().forEach(t => t.stop());
     if (cameraSwitch === operation) {
       cameraSwitch = null;
-      if (active && epoch === generation) { await refreshCallCameras(); reconcile(); }
+      if (active && epoch === generation) { await refreshCallCameras(); reconcile(); scheduleQuality(true); }
       cameraControls();
     }
   }
@@ -104,29 +138,46 @@ async function changeCamera(deviceId) {
 function videoEntries() { return [['local', $('local-tile')], ...tiles.entries()]; }
 function arrangeVideos() {
   const entries = videoEntries();
+  const grid = $("videos");
+  $('call-stage').style.setProperty('--controls-clearance', Math.max(0, $('call-stage').getBoundingClientRect().bottom - $('call-stage').querySelector('.controls').getBoundingClientRect().top + 14) + 'px');
+  $('call-stage').style.setProperty('--header-height', $('call-stage').querySelector('.stage-toolbar').getBoundingClientRect().height + 'px');
+  $('call-stage').style.setProperty('--title-clearance', Math.max(0, $('call-stage').querySelector('.stage-title').getBoundingClientRect().bottom - $('call-stage').getBoundingClientRect().top + 10) + 'px');
+  grid.classList.toggle("gallery-view", layoutMode === "gallery");
+  grid.classList.toggle("focus-view", layoutMode === "focus");
+  const columns = entries.length === 1 ? 1 : grid.clientWidth < 650 ? 2 : entries.length > 4 ? 3 : 2;
+  grid.style.setProperty("--gallery-columns", columns);
+  grid.style.setProperty("--gallery-rows", Math.ceil(entries.length / columns));
+  buttonLabel("view-mode", layoutMode === "gallery" ? "Focus view" : "Gallery view");
+  $("swap-video").hidden = layoutMode === "gallery";
   if (!entries.some(([id]) => id === selectedVideo)) selectedVideo = tiles.keys().next().value || 'local';
   // On first arrival, show the family large unless the user has chosen a view.
   const main = selectedVideo || 'local';
   let overlay = 0;
   for (const [id, tile] of entries) {
     const primary = id === main;
-    tile.classList.toggle('main-video', primary);
-    tile.classList.toggle('overlay-video', !primary);
+    tile.classList.toggle('main-video', layoutMode === 'focus' && primary);
+    tile.classList.toggle('overlay-video', layoutMode === 'focus' && !primary);
     tile.style.setProperty('--overlay-index', primary ? 0 : overlay++);
     const button = tile.querySelector('.tile-select');
-    if (button) { button.hidden = primary; button.tabIndex = primary ? -1 : 0; }
+    if (button) { button.hidden = layoutMode === 'focus' && primary; button.tabIndex = button.hidden ? -1 : 0; }
   }
   $('swap-video').disabled = entries.length < 2;
 }
-function selectVideo(id) { selectedVideo = id; arrangeVideos(); }
+function selectVideo(id) { selectedVideo = id; layoutMode = 'focus'; $('videos').scrollLeft = 0; arrangeVideos(); }
 function fullScreenElement() { return document.fullscreenElement || document.webkitFullscreenElement; }
 function syncFullscreen() {
-  const on = fullScreenElement() === $('call-stage') || $('call-stage').classList.contains('expanded');
-  $('fullscreen').textContent = on ? 'Exit full screen' : 'Full screen';
+  const stage = $('call-stage'), wasOn = stage.classList.contains('full-view');
+  const on = fullScreenElement() === stage || stage.classList.contains('expanded');
+  buttonLabel('fullscreen', on ? 'Exit full screen' : 'Full screen');
   $('fullscreen').setAttribute('aria-pressed', String(on));
   document.body.classList.toggle('stage-expanded', on);
-  $('call-stage').classList.toggle('full-view', on);
-  revealCallChrome();
+  stage.classList.toggle('full-view', on); placeNotifications();
+  arrangeVideos();
+  if (on && !wasOn) {
+    // Fullscreen starts clear, including when a settings panel was previously open.
+    setPanel(null); toggleCameraMenu(false); chromePointerInside = false;
+    clearTimeout(chromeTimer); setCallChrome(false);
+  } else if (!on) {chromePointerInside = false; revealCallChrome();}
 }
 async function exitStage() {
   $('call-stage').classList.remove('expanded');
@@ -138,7 +189,7 @@ async function exitStage() {
   } catch { /* The browser may already have exited fullscreen. */ }
   syncFullscreen();
 }
-const status = (text, error = false) => { $('status').textContent = text; $('status').classList.toggle('error', error); };
+const status = (text, error = false) => { $('status').textContent = text; $('status').classList.toggle('error', error); if (error) notify(text, {kind:'error',duration:6500}); };
 const cleanName = value => typeof value === 'string' ? value.trim().slice(0, 40) || 'Family' : 'Family';
 function invitation() { const v = new URLSearchParams(location.hash.slice(1)).get('room'); return /^[a-f0-9]{48}$/.test(v || '') ? v : ''; }
 function lobby() {
@@ -161,7 +212,7 @@ async function devices() {
 async function capture() {
   if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) throw new Error('Host this page on HTTPS to enable the camera and microphone.');
   stopMedia();
-  const h = Number($('quality').value);
+  const h = videoProfile().height;
   stream = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, ...($('microphone').value ? {deviceId: {exact: $('microphone').value}} : {}) },
     video: $('mode').value === 'audio' ? false : {width: {ideal: Math.round(h * 16 / 9)}, height: {ideal: h}, frameRate: {ideal: 24, max: 30}, ...($('camera').value ? {deviceId: {exact: $('camera').value}} : {facingMode: 'user'})}
@@ -183,6 +234,7 @@ function message(author, body, system = false) {
   const p = document.createElement('p'); p.textContent = body; row.append(p); $('messages').append(row);
   while ($('messages').children.length > 200) $('messages').firstElementChild.remove();
   $('messages').scrollTop = $('messages').scrollHeight;
+  if (!system && openPanel !== 'chat' && author !== ownName) {unreadMessages++;$('chat-badge').textContent=unreadMessages;$('chat-badge').hidden=false;}
 }
 function closeCall(id) { const c = calls.get(id); calls.delete(id); c?.close(); const v = tiles.get(id)?.querySelector('video'); if (v) v.srcObject = null; }
 function render() {
@@ -191,12 +243,12 @@ function render() {
     if (m.id === selfId) continue;
     if (!tiles.has(m.id)) {
       const tile = document.createElement('article'); tile.className = 'video-tile';
-      const back = document.createElement('div'); back.className = 'tile-backdrop'; back.textContent = 'Together';
+      const back = document.createElement('div'); back.className = 'tile-backdrop'; back.textContent = m.name.split(/\s+/).slice(0,2).map(n=>n[0]).join('').toUpperCase();
       const video = document.createElement('video'); video.autoplay = true; video.playsInline = true;
       const label = document.createElement('div'); label.className = 'tile-label';
       const choose = document.createElement('button'); choose.type = 'button'; choose.className = 'tile-select';
       choose.setAttribute('aria-label', `Show ${m.name} in the main view`);
-      const hint = document.createElement('span'); hint.textContent = 'Show large ↗'; choose.append(hint);
+      const hint = document.createElement('span'); hint.textContent = 'Focus'; choose.append(hint);
       choose.addEventListener('click', () => selectVideo(m.id));
       if (!tiles.size && selectedVideo === 'local') selectedVideo = null;
       tile.append(back, video, label, choose); tiles.set(m.id, tile); $('videos').append(tile);
@@ -204,8 +256,8 @@ function render() {
     const tile = tiles.get(m.id);
     tile.querySelector('.tile-label').textContent = m.name + (tile.querySelector('video').srcObject ? ' · Connected' : ' · Connecting…');
   }
-  $('people-count').textContent = `${roster.length} / 3 devices`; $('waiting').hidden = roster.length > 1;
-  arrangeVideos();
+  $('people-count').textContent = `${roster.length} / ${MAX_PARTICIPANTS} devices`; $('waiting').hidden = roster.length > 1;
+  arrangeVideos(); renderParticipants(); scheduleQuality();
 }
 function reconcile() {
   if (!active || cameraSwitch || !peer || peer.destroyed || peer.disconnected) return;
@@ -224,7 +276,7 @@ function attach(c) {
   c.on('stream', remote => {
     if (generation !== epoch || calls.get(c.peer) !== c) return;
     clearTimeout(deadline); render(); const v = tiles.get(c.peer)?.querySelector('video'); if (!v) return;
-    v.srcObject = remote; v.play().catch(() => {$('play-audio').hidden = false;}); render(); status('Together at last. Your wedding call is connected.');
+    v.srcObject = remote; void tuneSender(c, videoProfile()); v.play().catch(() => {$('play-audio').hidden = false;}); render(); status('Together at last. Your wedding call is connected.');
   });
   const ended = () => {
     clearTimeout(deadline); if (calls.get(c.peer) !== c) return;
@@ -242,12 +294,12 @@ function publishRoster() {
   broadcast({type: 'roster', members: roster}); render(); reconcile();
 }
 function enter() {
-  document.body.classList.add('in-call'); selectedVideo = null;
+  document.body.classList.add('in-call'); selectedVideo = null; layoutMode = 'gallery'; lastQualityProfile = ''; unreadMessages = 0; setPanel(null); $('call-quality').value = $('quality').value;
   active = true; busy = false; $('lobby').hidden = true; $('call-room').hidden = false; $('join').disabled = false;
   $('local-video').srcObject = stream; $('local-video').play().catch(() => {});
   $('local-label').textContent = `${ownName} · You${isHost ? ' · Host' : ''}`;
-  $('toggle-mic').textContent = 'Mute microphone'; $('toggle-mic').setAttribute('aria-pressed', 'false');
-  $('toggle-video').textContent = stream.getVideoTracks().length ? 'Turn camera off' : 'Voice only';
+  buttonLabel('toggle-mic', 'Mute microphone'); $('toggle-mic').setAttribute('aria-pressed', 'false');
+  buttonLabel('toggle-video', stream.getVideoTracks().length ? 'Turn camera off' : 'Voice only');
   $('toggle-video').disabled = !stream.getVideoTracks().length; $('toggle-video').setAttribute('aria-pressed', 'false');
   mirrorCamera(); cameraFeedback(stream.getVideoTracks().length ? '' : 'Voice-only call. Rejoin with video to enable a camera.');
   cameraControls(); void refreshCallCameras();
@@ -265,7 +317,7 @@ function acceptGuest(c) {
     if (generation !== epoch || !data || typeof data !== 'object') return;
     if (!admitted) {
       if (data.type !== 'hello' || data.token !== token) {c.close(); return;}
-      if (guests.size >= 2 || guests.has(c.peer)) {send(c, {type: 'rejected'}); setTimeout(() => c.close(), 500); return;}
+      if (guests.size >= MAX_PARTICIPANTS - 1 || guests.has(c.peer)) {send(c, {type: 'rejected'}); setTimeout(() => c.close(), 500); return;}
       admitted = true; clearTimeout(deadline); guests.set(c.peer, {connection: c, name: cleanName(data.name)});
       message('', `${cleanName(data.name)} joined the family.`, true); publishRoster(); return;
     }
@@ -287,10 +339,12 @@ function joinHost(generation) {
   c.on('open', () => send(c, {type: 'hello', token, name: ownName}));
   c.on('data', data => {
     if (generation !== epoch || !data || typeof data !== 'object') return;
-    if (data.type === 'rejected') {clearTimeout(deadline); end('This room already has three devices. Ask a family member to leave before joining.', true);}
+    if (data.type === 'rejected') {clearTimeout(deadline); end('This room already has eight devices. Ask a family member to leave before joining.', true);}
     if (data.type === 'ended') {clearTimeout(deadline); end('The host ended the wedding room. Ask for a new invitation to reconnect.');}
     if (data.type === 'roster' && Array.isArray(data.members)) {
-      const members = data.members.slice(0,3);
+      if (data.members.length > MAX_PARTICIPANTS) return;
+      const members = data.members;
+      if (new Set(members.map(m=>m?.id)).size !== members.length) return;
       if (!members.every(m => m && typeof m.id === 'string' && typeof m.name === 'string')) return;
       if (!members.some(m => m.id === selfId) || !members.some(m => m.id === hostId)) return;
       clearTimeout(deadline); roster = members.map(m => ({id: m.id, name: cleanName(m.name)}));
@@ -339,7 +393,7 @@ async function start() {
   } catch (e) {end(mediaError(e),true);} finally {$('preview-button').disabled = busy;}
 }
 function end(reason = 'You’ve left the call. Thank you for being part of our beginning.', error = false) {
-  toggleCameraMenu(false); clearTimeout(chromeTimer);
+  setPanel(null); toggleCameraMenu(false); clearTimeout(chromeTimer); chromePointerInside = false; suppressRevealClickUntil = 0;
   void exitStage(); document.body.classList.remove('in-call'); selectedVideo = null;
   if (isHost && active) broadcast({type:'ended'});
   ++epoch; active = false; busy = false; cameraSwitch = null; clearInterval(ticker); clearInterval(repair);
@@ -353,19 +407,36 @@ $('join').addEventListener('click', start);
 $('more-options').addEventListener('click', () => toggleCameraMenu($('camera-menu').hidden));
 $('close-camera-menu').addEventListener('click', () => toggleCameraMenu(false, true));
 $('call-stage').addEventListener('pointerdown', event => {
+  if (event.target.closest('#notification-region')) {suppressRevealClickUntil = 0; return;}
+  if (!$('call-stage').classList.contains('chrome-hidden')) suppressRevealClickUntil = 0;
+  if (event.pointerType === 'touch') chromePointerInside = false;
   if ($('call-stage').classList.contains('chrome-hidden')) {
     event.preventDefault(); event.stopImmediatePropagation();
+    suppressRevealClickUntil = performance.now() + 1200;
     revealCallChrome(); return;
   }
   if (!$('camera-menu').hidden && !event.target.closest('#camera-menu, #more-options')) toggleCameraMenu(false);
   revealCallChrome();
 }, true);
+$('call-stage').addEventListener('click', event => {
+  // The first tap reveals the controls without focusing a tile or activating a button.
+  if (event.detail && performance.now() < suppressRevealClickUntil) {
+    event.preventDefault(); event.stopImmediatePropagation(); suppressRevealClickUntil = 0;
+  }
+}, true);
 $('call-stage').addEventListener('pointermove', event => {
-  if (event.pointerType === 'touch') return;
-  const rect = $('call-stage').getBoundingClientRect();
-  if (event.clientY - rect.top < 100 || rect.bottom - event.clientY < 120) revealCallChrome();
+  if (event.pointerType === 'touch' || !$('call-stage').classList.contains('full-view')) return;
+  const inside = pointerAtControls(event), previouslyInside = chromePointerInside;
+  chromePointerInside = inside;
+  if (inside) revealCallChrome();
+  else if (previouslyInside) scheduleChromeHide();
+});
+$('call-stage').addEventListener('pointerleave', () => {
+  chromePointerInside = false;
+  if (!$('call-stage').classList.contains('chrome-hidden')) scheduleChromeHide();
 });
 $('call-stage').addEventListener('keydown', event => {
+  if (event.key === 'Escape' && openPanel) {event.preventDefault();event.stopPropagation();setPanel(null);return;}
   if (event.key === 'Escape' && !$('camera-menu').hidden) {event.preventDefault();event.stopPropagation();toggleCameraMenu(false,true);return;}
   revealCallChrome();
 });
@@ -408,17 +479,25 @@ for (const id of ['camera','microphone','quality','mode']) $(id).addEventListene
 });
 $('toggle-mic').addEventListener('click', () => {
   const t = stream?.getAudioTracks()[0]; if (!t) return; t.enabled = !t.enabled;
-  $('toggle-mic').textContent = t.enabled ? 'Mute microphone' : 'Unmute microphone'; $('toggle-mic').setAttribute('aria-pressed',String(!t.enabled));
+  buttonLabel('toggle-mic', t.enabled ? 'Mute microphone' : 'Unmute microphone'); $('toggle-mic').setAttribute('aria-pressed',String(!t.enabled)); notify(t.enabled ? 'Microphone on' : 'Microphone muted', {kind:'info'});
 });
 $('toggle-video').addEventListener('click', () => {
   const t = stream?.getVideoTracks()[0]; if (!t) return; t.enabled = !t.enabled;
-  $('toggle-video').textContent = t.enabled ? 'Turn camera off' : 'Turn camera on'; $('toggle-video').setAttribute('aria-pressed',String(!t.enabled));
+  buttonLabel('toggle-video', t.enabled ? 'Turn camera off' : 'Turn camera on'); $('toggle-video').setAttribute('aria-pressed',String(!t.enabled)); notify(t.enabled ? 'Camera on' : 'Camera off', {kind:'info'});
 });
 $('leave').addEventListener('click', () => end());
 $('play-audio').addEventListener('click', async () => {const r = await Promise.allSettled([...tiles.values()].map(t => t.querySelector('video').play())); $('play-audio').hidden = r.every(v => v.status === 'fulfilled');});
 $('copy-link').addEventListener('click', async () => {
-  try {await navigator.clipboard.writeText(roomLink); status('Invitation copied. Send it privately to your families.');}
-  catch {$('invitation').closest('details').open = true; $('invitation').focus(); $('invitation').select(); status('Copy the selected invitation link and send it to your families.');}
+  clearTimeout(inviteLabelTimer);
+  try {
+    await navigator.clipboard.writeText(roomLink);
+    buttonLabel('copy-link','Copied!');
+    notify('Invitation link copied', {detail:'Send it privately to your family.'});
+    inviteLabelTimer = setTimeout(()=>buttonLabel('copy-link','Invite'),2200);
+  } catch {
+    buttonLabel('copy-link','Invite');
+    notify('Copy the invitation manually', {kind:'info',detail:'Automatic copying is unavailable. Select this link and copy it.',manualLink:roomLink,duration:0});
+  }
 });
 $('chat-form').addEventListener('submit', e => {
   e.preventDefault(); const text = $('chat-input').value.trim().slice(0,1000); if (!active || !text) return;
@@ -431,3 +510,80 @@ window.addEventListener('hashchange', () => {if (!active && !busy) lobby();});
 window.addEventListener('offline', () => status('Your internet is offline. Keep this page open while it reconnects.',true));
 window.addEventListener('online', () => status(active ? 'Internet restored. Waiting for family connections to recover…' : 'Internet restored. You can join the wedding call.'));
 lobby();
+
+// Meeting layout and bandwidth controls.
+const ICONS = {
+ 'toggle-mic':'<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/>',
+ 'toggle-video':'<rect x="2" y="5" width="14" height="14" rx="3"/><path d="m16 9 6-3v12l-6-3"/>',
+ 'participants-toggle':'<circle cx="9" cy="7" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3M16 4a3 3 0 0 1 0 6M17 14a5 5 0 0 1 4 5v2"/>',
+ 'chat-toggle':'<path d="M21 11a8 8 0 0 1-8 8H7l-5 3V7a5 5 0 0 1 5-5h9a5 5 0 0 1 5 5Z"/><path d="M6 8h11M6 12h8"/>',
+ 'copy-link':'<path d="m9 15 6-6M9 7l1-1a5 5 0 0 1 7 7l-1 1M15 17l-1 1a5 5 0 0 1-7-7l1-1"/>',
+ 'more-options':'<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+ 'view-mode':'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
+ 'fullscreen':'<path d="M8 3H3v5M16 3h5v5M21 16v5h-5M8 21H3v-5"/>',
+ 'swap-video':'<path d="M4 7h16l-4-4M20 17H4l4 4"/>',
+ 'play-audio':'<path d="M11 4 5 9H2v6h3l6 5ZM15 8a6 6 0 0 1 0 8M18 5a10 10 0 0 1 0 14"/>'
+};
+function buttonLabel(id,text) {
+ const button=$(id),label=button.querySelector('.button-label');
+ if(label)label.textContent=text;else button.textContent=text;
+ button.setAttribute('aria-label',text);
+}
+function installIcons() {
+ for(const [id,path] of Object.entries(ICONS)){
+  const button=$(id),badge=button.querySelector('[id$="-badge"]'),label=document.createElement('span');label.className='button-label';
+  label.textContent=id==='participants-toggle'?'Participants':id==='chat-toggle'?'Chat':button.textContent.trim();button.replaceChildren();
+  // Static application-owned SVG paths only.
+  button.insertAdjacentHTML('afterbegin','<svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24">'+path+'</svg>');button.append(label);if(badge)button.append(badge);
+ }
+}
+function setPanel(panel) {
+ openPanel=panel;$('meeting-panel').hidden=!panel;$('chat-panel').hidden=panel!=='chat';$('participants-panel').hidden=panel!=='participants';
+ $('panel-title').textContent=panel==='participants'?'Participants':'Family chat';
+ $('chat-toggle').setAttribute('aria-expanded',String(panel==='chat'));$('participants-toggle').setAttribute('aria-expanded',String(panel==='participants'));
+ if(panel==='chat'){unreadMessages=0;$('chat-badge').hidden=true;}
+ revealCallChrome();requestAnimationFrame(arrangeVideos);
+}
+function renderParticipants() {
+ $('participant-list').replaceChildren();
+ for(const m of roster){
+  const row=document.createElement('li'),avatar=document.createElement('span'),name=document.createElement('span'),sub=document.createElement('small');
+  avatar.className='participant-avatar';avatar.textContent=m.name.split(/\s+/).slice(0,2).map(s=>s[0]).join('').toUpperCase();
+  name.className='participant-name';name.textContent=m.name+(m.id===selfId?' (you)':'');
+  sub.textContent=m.id===hostId||(isHost&&m.id===selfId)?'Host':'Guest';name.append(sub);row.append(avatar,name);$('participant-list').append(row);
+ }
+ $('participant-badge').textContent=roster.length;
+}
+function videoProfile() {
+ const choice=$('quality').value,n=Math.max(1,roster.length);
+ if(choice==='group')return n>5?{height:360,bitrate:250000,fps:18}:n>3?{height:480,bitrate:450000,fps:20}:{height:720,bitrate:900000,fps:24};
+ const h=Number(choice)||360;return {height:h,bitrate:h>=1080?2000000:h>=720?1200000:300000,fps:24};
+}
+async function tuneSender(call,profile) {
+ const pc=call.peerConnection;if(!pc||pc.connectionState==='closed')return;
+ const sender=pc.getSenders().find(s=>s.track?.kind==='video');if(!sender?.getParameters||!sender.setParameters)return;
+ const p=sender.getParameters();if(!p.encodings?.length)return;
+ p.encodings.forEach(e=>{e.maxBitrate=profile.bitrate;e.maxFramerate=profile.fps;});
+ try{await sender.setParameters(p);}catch{/* Browser adaptation remains available when limits are unsupported. */}
+}
+function scheduleQuality(force=false) {
+ if(!active)return;
+ const profile=videoProfile(),signature=JSON.stringify(profile);if(!force&&signature===lastQualityProfile)return;
+ lastQualityProfile=signature;const generation=epoch;
+ qualityQueue=qualityQueue.catch(()=>{}).then(async()=>{
+  if(!active||epoch!==generation)return;
+  const track=stream?.getVideoTracks()[0];
+  if(track?.applyConstraints)try{await track.applyConstraints({width:{ideal:Math.round(profile.height*16/9)},height:{ideal:profile.height},frameRate:{ideal:profile.fps,max:profile.fps}});}catch{}
+  if(!active||epoch!==generation)return;
+  await Promise.allSettled([...calls.values()].map(c=>tuneSender(c,profile)));
+ });
+}
+installIcons();
+$('view-mode').addEventListener('click',()=>{layoutMode=layoutMode==='gallery'?'focus':'gallery';$('videos').scrollLeft=0;arrangeVideos();});
+$('chat-toggle').addEventListener('click',()=>setPanel(openPanel==='chat'?null:'chat'));
+$('participants-toggle').addEventListener('click',()=>setPanel(openPanel==='participants'?null:'participants'));
+$('close-panel').addEventListener('click',()=>{const prior=openPanel;setPanel(null);$(prior==='chat'?'chat-toggle':'participants-toggle').focus();});
+$('waiting-invite').addEventListener('click',()=>$('copy-link').click());
+$('call-quality').addEventListener('change',()=>{$('quality').value=$('call-quality').value;scheduleQuality(true);cameraFeedback('Video quality preference updated.');notify('Video quality preference updated', {detail:$('call-quality').selectedOptions[0].textContent});});
+new ResizeObserver(()=>{if(active)arrangeVideos();}).observe($('videos'));
+
