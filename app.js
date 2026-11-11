@@ -257,7 +257,7 @@ function render() {
     tile.querySelector('.tile-label').textContent = m.name + (tile.querySelector('video').srcObject ? ' · Connected' : ' · Connecting…');
   }
   $('people-count').textContent = `${roster.length} / ${MAX_PARTICIPANTS} devices`; $('waiting').hidden = roster.length > 1;
-  arrangeVideos(); renderParticipants(); scheduleQuality();
+  arrangeVideos(); renderParticipants(); scheduleQuality(); recordingControls();
 }
 function reconcile() {
   if (!active || cameraSwitch || !peer || peer.destroyed || peer.disconnected) return;
@@ -291,7 +291,7 @@ function attach(c) {
 }
 function publishRoster() {
   roster = [{id: selfId, name: ownName}, ...[...guests].map(([id, g]) => ({id, name: g.name}))];
-  broadcast({type: 'roster', members: roster}); render(); reconcile();
+  broadcast({type: 'roster', members: roster, recording: recordingState()}); render(); reconcile();
 }
 function enter() {
   document.body.classList.add('in-call'); selectedVideo = null; layoutMode = 'gallery'; lastQualityProfile = ''; unreadMessages = 0; setPanel(null); $('call-quality').value = $('quality').value;
@@ -348,8 +348,9 @@ function joinHost(generation) {
       if (!members.every(m => m && typeof m.id === 'string' && typeof m.name === 'string')) return;
       if (!members.some(m => m.id === selfId) || !members.some(m => m.id === hostId)) return;
       clearTimeout(deadline); roster = members.map(m => ({id: m.id, name: cleanName(m.name)}));
-      if (!active) enter(); render(); reconcile();
+      if (!active) enter(); render(); reconcile(); recordingNoticeForGuests(data.recording);
     }
+    if (data.type === 'recording' && active) recordingNoticeForGuests(data);
     if (data.type === 'chat' && active && typeof data.text === 'string') message(cleanName(data.author), data.text.slice(0,1000));
   });
   const failed = () => {clearTimeout(deadline); if (generation === epoch) end('The host connection closed. If their room is still open, press Join to reconnect.', true);};
@@ -393,6 +394,7 @@ async function start() {
   } catch (e) {end(mediaError(e),true);} finally {$('preview-button').disabled = busy;}
 }
 function end(reason = 'You’ve left the call. Thank you for being part of our beginning.', error = false) {
+  void stopWeddingRecording(); remoteRecording = false;
   setPanel(null); toggleCameraMenu(false); clearTimeout(chromeTimer); chromePointerInside = false; suppressRevealClickUntil = 0;
   void exitStage(); document.body.classList.remove('in-call'); selectedVideo = null;
   if (isHost && active) broadcast({type:'ended'});
@@ -401,13 +403,13 @@ function end(reason = 'You’ve left the call. Thank you for being part of our b
   guests.clear(); roster = []; peer?.destroy(); peer = null; hostConnection = null; stopMedia();
   for (const tile of tiles.values()) tile.remove(); tiles.clear();
   $('call-room').hidden = true; $('lobby').hidden = false; $('join').disabled = false; $('preview-button').disabled = false;
-  $('play-audio').hidden = true; $('messages').replaceChildren(); lobby(); status(reason,error);
+  $('play-audio').hidden = true; $('messages').replaceChildren(); recordingControls(); lobby(); status(reason,error);
 }
 $('join').addEventListener('click', start);
 $('more-options').addEventListener('click', () => toggleCameraMenu($('camera-menu').hidden));
 $('close-camera-menu').addEventListener('click', () => toggleCameraMenu(false, true));
 $('call-stage').addEventListener('pointerdown', event => {
-  if (event.target.closest('#notification-region')) {suppressRevealClickUntil = 0; return;}
+  if (event.target.closest('#notification-region, #recordings-dialog')) {suppressRevealClickUntil = 0; return;}
   if (!$('call-stage').classList.contains('chrome-hidden')) suppressRevealClickUntil = 0;
   if (event.pointerType === 'touch') chromePointerInside = false;
   if ($('call-stage').classList.contains('chrome-hidden')) {
@@ -519,6 +521,7 @@ const ICONS = {
  'chat-toggle':'<path d="M21 11a8 8 0 0 1-8 8H7l-5 3V7a5 5 0 0 1 5-5h9a5 5 0 0 1 5 5Z"/><path d="M6 8h11M6 12h8"/>',
  'copy-link':'<path d="m9 15 6-6M9 7l1-1a5 5 0 0 1 7 7l-1 1M15 17l-1 1a5 5 0 0 1-7-7l1-1"/>',
  'more-options':'<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+ 'record-toggle':'<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/>',
  'view-mode':'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
  'fullscreen':'<path d="M8 3H3v5M16 3h5v5M21 16v5h-5M8 21H3v-5"/>',
  'swap-video':'<path d="M4 7h16l-4-4M20 17H4l4 4"/>',
