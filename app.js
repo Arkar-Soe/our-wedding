@@ -98,7 +98,7 @@ async function changeCamera(deviceId) {
   const targets = [];
   try {
     const h = videoProfile().height;
-    acquired = await navigator.mediaDevices.getUserMedia({audio:false, video:{deviceId:{exact:deviceId}, width:{ideal:Math.round(h*16/9)}, height:{ideal:h}, frameRate:{ideal:24,max:30}}});
+    acquired = await navigator.mediaDevices.getUserMedia({audio:false, video:{deviceId:{exact:deviceId}, width:{exact:1920}, height:{exact:1080}, frameRate:{ideal:24,max:30}}});
     next = acquired.getVideoTracks()[0];
     if (!next) throw new Error('NO_CAMERA');
     if (!active || epoch !== generation) return;
@@ -125,12 +125,12 @@ async function changeCamera(deviceId) {
   } catch (error) {
     if (active && epoch === generation) cameraFeedback(error.name === 'NotAllowedError'
       ? 'Camera permission denied. Your previous camera is unchanged.'
-      : 'Could not switch cameras. Your previous camera is kept; try another camera or close other camera apps.');
+      : error.name==='OverconstrainedError'?'This camera cannot provide 1080p. Your previous camera is kept.':'Could not switch cameras. Your previous camera is kept; try another camera or close other camera apps.');
   } finally {
     acquired?.getTracks().forEach(t => t.stop());
     if (cameraSwitch === operation) {
       cameraSwitch = null;
-      if (active && epoch === generation) { await refreshCallCameras(); reconcile(); scheduleQuality(true); }
+      if (active && epoch === generation) { await refreshCallCameras(); reconcile(); scheduleQuality(true); recordingVideoStateChanged(); }
       cameraControls();
     }
   }
@@ -215,13 +215,14 @@ async function capture() {
   const h = videoProfile().height;
   stream = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, ...($('microphone').value ? {deviceId: {exact: $('microphone').value}} : {}) },
-    video: $('mode').value === 'audio' ? false : {width: {ideal: Math.round(h * 16 / 9)}, height: {ideal: h}, frameRate: {ideal: 24, max: 30}, ...($('camera').value ? {deviceId: {exact: $('camera').value}} : {facingMode: 'user'})}
+    video: $('mode').value === 'audio' ? false : {width: {exact: 1920}, height: {exact: 1080}, frameRate: {ideal: 24, max: 30}, ...($('camera').value ? {deviceId: {exact: $('camera').value}} : {facingMode: 'user'})}
   });
   $('preview').srcObject = stream; $('preview-placeholder').hidden = stream.getVideoTracks().length > 0;
   await $('preview').play().catch(() => {}); await devices().catch(() => {});
 }
 function mediaError(e) {
   if (e.name === 'NotAllowedError') return 'Allow camera and microphone access in your browser settings, then try again.';
+  if (e.name === 'OverconstrainedError') return 'This camera cannot provide 1920×1080 with the current settings. Choose another 1080p camera or join with voice only.';
   if (e.name === 'NotFoundError') return 'Camera or microphone not found. Connect a device, or choose Voice only if you have no camera.';
   if (e.name === 'NotReadableError') return 'Your camera or microphone is busy. Close other apps using it and retry.';
   return e.message === 'Host this page on HTTPS to enable the camera and microphone.' ? e.message : 'Could not start the call. Check your devices, browser permissions, and internet connection.';
@@ -244,7 +245,7 @@ function render() {
     if (!tiles.has(m.id)) {
       const tile = document.createElement('article'); tile.className = 'video-tile';
       const back = document.createElement('div'); back.className = 'tile-backdrop'; back.textContent = m.name.split(/\s+/).slice(0,2).map(n=>n[0]).join('').toUpperCase();
-      const video = document.createElement('video'); video.autoplay = true; video.playsInline = true;
+      const video = document.createElement('video'); video.autoplay = true; video.playsInline = true; video.addEventListener('resize',()=>{if(active)render();});
       const label = document.createElement('div'); label.className = 'tile-label';
       const choose = document.createElement('button'); choose.type = 'button'; choose.className = 'tile-select';
       choose.setAttribute('aria-label', `Show ${m.name} in the main view`);
@@ -254,20 +255,46 @@ function render() {
       tile.append(back, video, label, choose); tiles.set(m.id, tile); $('videos').append(tile);
     }
     const tile = tiles.get(m.id);
-    tile.querySelector('.tile-label').textContent = m.name + (tile.querySelector('video').srcObject ? ' · Connected' : ' · Connecting…');
+    const video=tile.querySelector('video'), received=video.srcObject;
+    const quality=video.videoWidth ? (Math.min(video.videoWidth,video.videoHeight)>=1080&&Math.max(video.videoWidth,video.videoHeight)>=1920?'1080p':video.videoWidth+'×'+video.videoHeight+' received') : received?.getVideoTracks().length===0?'Voice only':'Connected';
+    tile.querySelector('.tile-label').textContent=m.name+(received?' · '+quality:' · Connecting…');
   }
   $('people-count').textContent = `${roster.length} / ${MAX_PARTICIPANTS} devices`; $('waiting').hidden = roster.length > 1;
   arrangeVideos(); renderParticipants(); scheduleQuality(); recordingControls();
 }
+const fullHDTransports=new WeakSet();
+function maintainFullHDTransport(call) {
+  const pc=call.peerConnection;if(!pc||fullHDTransports.has(pc))return;fullHDTransports.add(pc);
+  const apply=()=>{if(calls.get(call.peer)===call&&(pc.connectionState==='connected'||pc.signalingState==='stable'))void tuneSender(call,videoProfile());};
+  pc.addEventListener('connectionstatechange',apply);pc.addEventListener('signalingstatechange',apply);apply();
+}
+// Prefer H.264 without removing other mutually supported codecs.
+function preferFullHDVideoCodec(sdp) {
+  const newline=sdp.includes('\r\n')?'\r\n':'\n';
+  return sdp.split(/(?=^m=)/m).map(section=>{
+    if(!section.startsWith('m=video '))return section;
+    const lines=section.split(newline),header=lines[0].split(' '),payloads=header.slice(3);
+    const h264=lines.map(line=>/^a=rtpmap:(\d+) H264\/90000/i.exec(line)?.[1]).filter(Boolean);
+    if(!h264.length)return section;
+    const preferred=[];
+    for(const payload of payloads.filter(p=>h264.includes(p))){
+      preferred.push(payload);
+      for(const line of lines){const match=/^a=fmtp:(\d+) .*\bapt=(\d+)(?:;|\s|$)/.exec(line);if(match&&match[2]===payload&&payloads.includes(match[1]))preferred.push(match[1]);}
+    }
+    lines[0]=[...header.slice(0,3),...new Set(preferred),...payloads.filter(p=>!preferred.includes(p))].join(' ');
+    return lines.join(newline);
+  }).join('');
+}
+
 function reconcile() {
   if (!active || cameraSwitch || !peer || peer.destroyed || peer.disconnected) return;
   for (const m of roster) if (selfId < m.id && !calls.has(m.id)) {
-    try {const c = peer.call(m.id, stream, {metadata: {room: token}}); if (c) attach(c);} catch {status('Retrying a family connection…');}
+    try {const c = peer.call(m.id, stream, {metadata: {room: token}, sdpTransform: preferFullHDVideoCodec}); if (c) attach(c);} catch {status('Retrying a family connection…');}
   }
 }
 function attach(c) {
   if (calls.has(c.peer)) {c.close(); return;}
-  calls.set(c.peer, c); const generation = epoch;
+  calls.set(c.peer, c); maintainFullHDTransport(c); const generation = epoch;
   const deadline = setTimeout(() => {
     if (generation === epoch && calls.get(c.peer) === c && !tiles.get(c.peer)?.querySelector('video').srcObject) {
       closeCall(c.peer); status('A family device could not connect. This free setup has no TURN relay; try a different permitted network.', true);
@@ -275,7 +302,7 @@ function attach(c) {
   }, 25000);
   c.on('stream', remote => {
     if (generation !== epoch || calls.get(c.peer) !== c) return;
-    clearTimeout(deadline); render(); const v = tiles.get(c.peer)?.querySelector('video'); if (!v) return;
+    maintainFullHDTransport(c); clearTimeout(deadline); render(); const v = tiles.get(c.peer)?.querySelector('video'); if (!v) return;
     v.srcObject = remote; void tuneSender(c, videoProfile()); v.play().catch(() => {$('play-audio').hidden = false;}); render(); status('Together at last. Your wedding call is connected.');
   });
   const ended = () => {
@@ -378,7 +405,7 @@ async function start() {
       const accept = () => {
         if (epoch === generation && active && cameraSwitch) {setTimeout(accept, 200); return;}
         if (epoch !== generation || !active || c.metadata?.room !== token || !roster.some(m => m.id === c.peer) || calls.has(c.peer)) {c.close(); return;}
-        attach(c); c.answer(stream);
+        attach(c); c.answer(stream, {sdpTransform:preferFullHDVideoCodec});
       };
       if (roster.some(m => m.id === c.peer)) accept(); else setTimeout(accept, 1200);
     });
@@ -485,7 +512,7 @@ $('toggle-mic').addEventListener('click', () => {
 });
 $('toggle-video').addEventListener('click', () => {
   const t = stream?.getVideoTracks()[0]; if (!t) return; t.enabled = !t.enabled;
-  buttonLabel('toggle-video', t.enabled ? 'Turn camera off' : 'Turn camera on'); $('toggle-video').setAttribute('aria-pressed',String(!t.enabled)); notify(t.enabled ? 'Camera on' : 'Camera off', {kind:'info'});
+  buttonLabel('toggle-video', t.enabled ? 'Turn camera off' : 'Turn camera on'); $('toggle-video').setAttribute('aria-pressed',String(!t.enabled)); recordingVideoStateChanged(); notify(t.enabled ? 'Camera on' : 'Camera off', {kind:'info'});
 });
 $('leave').addEventListener('click', () => end());
 $('play-audio').addEventListener('click', async () => {const r = await Promise.allSettled([...tiles.values()].map(t => t.querySelector('video').play())); $('play-audio').hidden = r.every(v => v.status === 'fulfilled');});
@@ -557,16 +584,13 @@ function renderParticipants() {
  }
  $('participant-badge').textContent=roster.length;
 }
-function videoProfile() {
- const choice=$('quality').value,n=Math.max(1,roster.length);
- if(choice==='group')return n>5?{height:360,bitrate:250000,fps:18}:n>3?{height:480,bitrate:450000,fps:20}:{height:720,bitrate:900000,fps:24};
- const h=Number(choice)||360;return {height:h,bitrate:h>=1080?2000000:h>=720?1200000:300000,fps:24};
-}
+function videoProfile() { return {height:1080,bitrate:4000000,fps:24}; }
 async function tuneSender(call,profile) {
  const pc=call.peerConnection;if(!pc||pc.connectionState==='closed')return;
  const sender=pc.getSenders().find(s=>s.track?.kind==='video');if(!sender?.getParameters||!sender.setParameters)return;
  const p=sender.getParameters();if(!p.encodings?.length)return;
- p.encodings.forEach(e=>{e.maxBitrate=profile.bitrate;e.maxFramerate=profile.fps;});
+ p.degradationPreference="maintain-resolution";
+ p.encodings.forEach(e=>{e.maxBitrate=profile.bitrate;e.maxFramerate=profile.fps;e.scaleResolutionDownBy=1;});
  try{await sender.setParameters(p);}catch{/* Browser adaptation remains available when limits are unsupported. */}
 }
 function scheduleQuality(force=false) {
@@ -576,7 +600,7 @@ function scheduleQuality(force=false) {
  qualityQueue=qualityQueue.catch(()=>{}).then(async()=>{
   if(!active||epoch!==generation)return;
   const track=stream?.getVideoTracks()[0];
-  if(track?.applyConstraints)try{await track.applyConstraints({width:{ideal:Math.round(profile.height*16/9)},height:{ideal:profile.height},frameRate:{ideal:profile.fps,max:profile.fps}});}catch{}
+  if(track?.applyConstraints)try{await track.applyConstraints({width:{exact:1920},height:{exact:1080},frameRate:{ideal:profile.fps,max:profile.fps}});}catch{}
   if(!active||epoch!==generation)return;
   await Promise.allSettled([...calls.values()].map(c=>tuneSender(c,profile)));
  });
