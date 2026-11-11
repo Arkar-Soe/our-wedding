@@ -5,6 +5,9 @@ const guests = new Map(), calls = new Map(), tiles = new Map();
 const MAX_PARTICIPANTS = 8;
 let layoutMode = "gallery", openPanel = null, unreadMessages = 0;
 let qualityQueue = Promise.resolve(), lastQualityProfile = "";
+const LIVE_QUALITY_LEVELS=[{height:1080,bitrate:3500000,fps:24},{height:720,bitrate:1500000,fps:24},{height:480,bitrate:850000,fps:20},{height:360,bitrate:420000,fps:15},{height:240,bitrate:180000,fps:12}];
+const autoQuality={level:0,bad:0,good:0,roomCeiling:1080,timer:null,probe:null,busy:false,previous:new Map(),maxLoopLag:0,pressure:false,cpuPressure:false};
+
 let stream, peer, hostConnection, token, ownName, selfId, hostId, roomLink;
 let active = false, busy = false, isHost = false, epoch = 0, roster = [], ticker, repair;
 let selectedVideo = null;
@@ -98,7 +101,7 @@ async function changeCamera(deviceId) {
   const targets = [];
   try {
     const h = videoProfile().height;
-    acquired = await navigator.mediaDevices.getUserMedia({audio:false, video:{deviceId:{exact:deviceId}, width:{exact:1920}, height:{exact:1080}, frameRate:{ideal:24,max:30}}});
+    acquired = await navigator.mediaDevices.getUserMedia({audio:false, video:{deviceId:{exact:deviceId}, width:{ideal:Math.round(h*16/9)}, height:{ideal:h}, frameRate:{ideal:24,max:30}}});
     next = acquired.getVideoTracks()[0];
     if (!next) throw new Error('NO_CAMERA');
     if (!active || epoch !== generation) return;
@@ -125,7 +128,7 @@ async function changeCamera(deviceId) {
   } catch (error) {
     if (active && epoch === generation) cameraFeedback(error.name === 'NotAllowedError'
       ? 'Camera permission denied. Your previous camera is unchanged.'
-      : error.name==='OverconstrainedError'?'This camera cannot provide 1080p. Your previous camera is kept.':'Could not switch cameras. Your previous camera is kept; try another camera or close other camera apps.');
+      : error.name==='OverconstrainedError'?'This camera cannot use the requested settings. Your previous camera is kept.':'Could not switch cameras. Your previous camera is kept; try another camera or close other camera apps.');
   } finally {
     acquired?.getTracks().forEach(t => t.stop());
     if (cameraSwitch === operation) {
@@ -215,14 +218,14 @@ async function capture() {
   const h = videoProfile().height;
   stream = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, ...($('microphone').value ? {deviceId: {exact: $('microphone').value}} : {}) },
-    video: $('mode').value === 'audio' ? false : {width: {exact: 1920}, height: {exact: 1080}, frameRate: {ideal: 24, max: 30}, ...($('camera').value ? {deviceId: {exact: $('camera').value}} : {facingMode: 'user'})}
+    video: $('mode').value === 'audio' ? false : {width: {ideal:Math.round(h*16/9)}, height: {ideal:h}, frameRate: {ideal: 24, max: 30}, ...($('camera').value ? {deviceId: {exact: $('camera').value}} : {facingMode: 'user'})}
   });
   $('preview').srcObject = stream; $('preview-placeholder').hidden = stream.getVideoTracks().length > 0;
   await $('preview').play().catch(() => {}); await devices().catch(() => {});
 }
 function mediaError(e) {
   if (e.name === 'NotAllowedError') return 'Allow camera and microphone access in your browser settings, then try again.';
-  if (e.name === 'OverconstrainedError') return 'This camera cannot provide 1920×1080 with the current settings. Choose another 1080p camera or join with voice only.';
+  if (e.name === 'OverconstrainedError') return 'This camera cannot use those settings. Choose another camera or join with voice only.';
   if (e.name === 'NotFoundError') return 'Camera or microphone not found. Connect a device, or choose Voice only if you have no camera.';
   if (e.name === 'NotReadableError') return 'Your camera or microphone is busy. Close other apps using it and retry.';
   return e.message === 'Host this page on HTTPS to enable the camera and microphone.' ? e.message : 'Could not start the call. Check your devices, browser permissions, and internet connection.';
@@ -318,7 +321,7 @@ function attach(c) {
 }
 function publishRoster() {
   roster = [{id: selfId, name: ownName}, ...[...guests].map(([id, g]) => ({id, name: g.name}))];
-  broadcast({type: 'roster', members: roster, recording: recordingState()}); render(); reconcile();
+  broadcast({type: 'roster', members: roster, recording: recordingState(),qualityHint:videoProfile().height}); render(); reconcile();
 }
 function enter() {
   document.body.classList.add('in-call'); selectedVideo = null; layoutMode = 'gallery'; lastQualityProfile = ''; unreadMessages = 0; setPanel(null); $('call-quality').value = $('quality').value;
@@ -330,6 +333,7 @@ function enter() {
   $('toggle-video').disabled = !stream.getVideoTracks().length; $('toggle-video').setAttribute('aria-pressed', 'false');
   mirrorCamera(); cameraFeedback(stream.getVideoTracks().length ? '' : 'Voice-only call. Rejoin with video to enable a camera.');
   cameraControls(); void refreshCallCameras();
+  startAutoQualityMonitoring();
   $('invitation').value = roomLink; $('messages').replaceChildren(); message('', 'Welcome to our wedding. Chat is not saved after you leave.', true);
   const start = Date.now(); $('elapsed').textContent = '00:00:00';
   ticker = setInterval(() => {const s = Math.floor((Date.now() - start) / 1000); $('elapsed').textContent = [Math.floor(s/3600), Math.floor(s/60)%60, s%60].map(n => String(n).padStart(2,'0')).join(':');}, 1000);
@@ -375,8 +379,9 @@ function joinHost(generation) {
       if (!members.every(m => m && typeof m.id === 'string' && typeof m.name === 'string')) return;
       if (!members.some(m => m.id === selfId) || !members.some(m => m.id === hostId)) return;
       clearTimeout(deadline); roster = members.map(m => ({id: m.id, name: cleanName(m.name)}));
-      if (!active) enter(); render(); reconcile(); recordingNoticeForGuests(data.recording);
+      if (!active) enter();if(LIVE_QUALITY_LEVELS.some(p=>p.height===data.qualityHint))autoQuality.roomCeiling=data.qualityHint;render(); reconcile(); recordingNoticeForGuests(data.recording);
     }
+    if(data.type==='quality-hint'&&active&&LIVE_QUALITY_LEVELS.some(p=>p.height===data.maxHeight)){autoQuality.roomCeiling=data.maxHeight;scheduleQuality(true);}
     if (data.type === 'recording' && active) recordingNoticeForGuests(data);
     if (data.type === 'chat' && active && typeof data.text === 'string') message(cleanName(data.author), data.text.slice(0,1000));
   });
@@ -421,7 +426,7 @@ async function start() {
   } catch (e) {end(mediaError(e),true);} finally {$('preview-button').disabled = busy;}
 }
 function end(reason = 'You’ve left the call. Thank you for being part of our beginning.', error = false) {
-  void stopWeddingRecording(); remoteRecording = false;
+  void stopWeddingRecording(); resetAutoQuality(); remoteRecording = false;
   setPanel(null); toggleCameraMenu(false); clearTimeout(chromeTimer); chromePointerInside = false; suppressRevealClickUntil = 0;
   void exitStage(); document.body.classList.remove('in-call'); selectedVideo = null;
   if (isHost && active) broadcast({type:'ended'});
@@ -584,23 +589,90 @@ function renderParticipants() {
  }
  $('participant-badge').textContent=roster.length;
 }
-function videoProfile() { return {height:1080,bitrate:4000000,fps:24}; }
+function videoProfile() {
+ const n=Math.max(1,roster.length),cores=navigator.hardwareConcurrency||4,network=navigator.connection;
+ let ceiling=$('quality').value==='auto'?1080:Number($('quality').value)||1080;
+ if(n>5)ceiling=Math.min(ceiling,480);else if(n>3||cores<=4)ceiling=Math.min(ceiling,720);
+ if(network?.saveData)ceiling=Math.min(ceiling,360);
+ if(network?.effectiveType==='2g'||network?.effectiveType==='slow-2g')ceiling=Math.min(ceiling,240);
+ else if(network?.effectiveType==='3g')ceiling=Math.min(ceiling,480);
+ ceiling=Math.min(ceiling,autoQuality.roomCeiling);
+ const base=LIVE_QUALITY_LEVELS.findIndex(p=>p.height<=ceiling);
+ return {...LIVE_QUALITY_LEVELS[Math.min(LIVE_QUALITY_LEVELS.length-1,Math.max(0,base)+autoQuality.level)]};
+}
+function resetAutoQuality() {
+ clearInterval(autoQuality.timer);clearInterval(autoQuality.probe);autoQuality.timer=null;autoQuality.probe=null;
+ autoQuality.level=0;autoQuality.bad=0;autoQuality.good=0;autoQuality.roomCeiling=1080;autoQuality.maxLoopLag=0;autoQuality.pressure=false;autoQuality.cpuPressure=false;autoQuality.previous.clear();
+}
+function consumeQualitySample(sample) {
+ const severe=sample.loss>.12||sample.loopLag>500||sample.rtt>1;
+ const poor=severe||sample.loss>.04||sample.rtt>.45||sample.cpu||sample.bandwidth||sample.loopLag>150||sample.decodeOverload;
+ autoQuality.pressure=poor;autoQuality.cpuPressure=!!(sample.cpu||sample.decodeOverload||sample.loopLag>150);
+ if(poor){autoQuality.bad++;autoQuality.good=0;}else{autoQuality.bad=0;autoQuality.good++;}
+ const old=autoQuality.level;
+ if((severe||autoQuality.bad>=2)&&autoQuality.level<LIVE_QUALITY_LEVELS.length-1){autoQuality.level++;autoQuality.bad=0;}
+ else if(autoQuality.good>=8&&autoQuality.level>0){autoQuality.level--;autoQuality.good=0;}
+ if(old!==autoQuality.level){
+  scheduleQuality(true);
+  notify('Call quality adjusted automatically',{kind:'info',detail:videoProfile().height+'p · '+(autoQuality.level>old?'keeping the call smooth':'conditions have improved')});
+  if(isHost)broadcast({type:'quality-hint',maxHeight:videoProfile().height});
+ }
+ if(typeof adaptRecordingQuality==='function')void adaptRecordingQuality(poor);
+ return {poor,severe,changed:old!==autoQuality.level};
+}
+async function sampleCallQuality() {
+ if(!active||autoQuality.busy)return;autoQuality.busy=true;const generation=epoch;
+ const sample={loss:0,rtt:0,cpu:false,bandwidth:false,decodeOverload:false,loopLag:autoQuality.maxLoopLag};autoQuality.maxLoopLag=0;
+ try{
+  await Promise.allSettled([...calls.values()].map(async call=>{
+   const pc=call.peerConnection;if(!pc||pc.connectionState==='closed')return;
+   const stats=await pc.getStats();
+   for(const report of stats.values()){
+    if(report.type==='candidate-pair'&&(report.state==='succeeded'||report.nominated))sample.rtt=Math.max(sample.rtt,report.currentRoundTripTime||0);
+    if((report.kind||report.mediaType)!=='video')continue;
+    const key=call.peer+':'+report.id,previous=autoQuality.previous.get(key);autoQuality.previous.set(key,report);
+    if(report.type==='remote-inbound-rtp'){
+     sample.rtt=Math.max(sample.rtt,report.roundTripTime||0);
+     sample.loss=Math.max(sample.loss,report.fractionLost||0);
+    }
+    if(report.type==='outbound-rtp'){
+     sample.cpu ||= report.qualityLimitationReason==='cpu';sample.bandwidth ||= report.qualityLimitationReason==='bandwidth';
+     if(previous){const frames=(report.framesEncoded||0)-(previous.framesEncoded||0),time=(report.totalEncodeTime||0)-(previous.totalEncodeTime||0);if(frames>5&&time/frames>1/videoProfile().fps*.8)sample.cpu=true;}
+    }
+    if(report.type==='inbound-rtp'&&previous){
+     const lost=Math.max(0,(report.packetsLost||0)-(previous.packetsLost||0)),received=Math.max(0,(report.packetsReceived||0)-(previous.packetsReceived||0));
+     if(lost+received>20)sample.loss=Math.max(sample.loss,lost/(lost+received));
+     const decoded=(report.framesDecoded||0)-(previous.framesDecoded||0),dropped=Math.max(0,(report.framesDropped||0)-(previous.framesDropped||0));
+     if(decoded+dropped>10&&dropped/(decoded+dropped)>.25)sample.decodeOverload=true;
+    }
+   }
+  }));
+  if(active&&epoch===generation)consumeQualitySample(sample);
+ }finally{autoQuality.busy=false;}
+}
+function startAutoQualityMonitoring() {
+ clearInterval(autoQuality.timer);clearInterval(autoQuality.probe);let last=performance.now();
+ autoQuality.probe=setInterval(()=>{const now=performance.now();if(document.visibilityState==='visible')autoQuality.maxLoopLag=Math.max(autoQuality.maxLoopLag,Math.max(0,now-last-1000));last=now;},1000);
+ autoQuality.timer=setInterval(()=>{void sampleCallQuality();},4000);
+}
+
 async function tuneSender(call,profile) {
  const pc=call.peerConnection;if(!pc||pc.connectionState==='closed')return;
  const sender=pc.getSenders().find(s=>s.track?.kind==='video');if(!sender?.getParameters||!sender.setParameters)return;
  const p=sender.getParameters();if(!p.encodings?.length)return;
- p.degradationPreference="maintain-resolution";
- p.encodings.forEach(e=>{e.maxBitrate=profile.bitrate;e.maxFramerate=profile.fps;e.scaleResolutionDownBy=1;});
+ p.degradationPreference="balanced";
+ const settings=sender.track.getSettings?.()||{},height=Math.min(settings.width||profile.height,settings.height||profile.height);
+ p.encodings.forEach(e=>{e.maxBitrate=profile.bitrate;e.maxFramerate=profile.fps;e.scaleResolutionDownBy=Math.max(1,height/profile.height);});
  try{await sender.setParameters(p);}catch{/* Browser adaptation remains available when limits are unsupported. */}
 }
 function scheduleQuality(force=false) {
  if(!active)return;
  const profile=videoProfile(),signature=JSON.stringify(profile);if(!force&&signature===lastQualityProfile)return;
- lastQualityProfile=signature;const generation=epoch;
+ lastQualityProfile=signature;if($('auto-quality-status'))$('auto-quality-status').textContent='Auto · '+profile.height+'p · '+profile.fps+' fps';const generation=epoch;
  qualityQueue=qualityQueue.catch(()=>{}).then(async()=>{
   if(!active||epoch!==generation)return;
   const track=stream?.getVideoTracks()[0];
-  if(track?.applyConstraints)try{await track.applyConstraints({width:{exact:1920},height:{exact:1080},frameRate:{ideal:profile.fps,max:profile.fps}});}catch{}
+  if(track?.applyConstraints)try{await track.applyConstraints({width:{ideal:Math.round(profile.height*16/9)},height:{ideal:profile.height},frameRate:{ideal:profile.fps,max:profile.fps}});}catch{}
   if(!active||epoch!==generation)return;
   await Promise.allSettled([...calls.values()].map(c=>tuneSender(c,profile)));
  });
@@ -611,6 +683,6 @@ $('chat-toggle').addEventListener('click',()=>setPanel(openPanel==='chat'?null:'
 $('participants-toggle').addEventListener('click',()=>setPanel(openPanel==='participants'?null:'participants'));
 $('close-panel').addEventListener('click',()=>{const prior=openPanel;setPanel(null);$(prior==='chat'?'chat-toggle':'participants-toggle').focus();});
 $('waiting-invite').addEventListener('click',()=>$('copy-link').click());
-$('call-quality').addEventListener('change',()=>{$('quality').value=$('call-quality').value;scheduleQuality(true);cameraFeedback('Video quality preference updated.');notify('Video quality preference updated', {detail:$('call-quality').selectedOptions[0].textContent});});
+$('call-quality').addEventListener('change',()=>{$('quality').value=$('call-quality').value;autoQuality.level=0;autoQuality.bad=0;autoQuality.good=0;scheduleQuality(true);cameraFeedback('Video quality preference updated.');notify('Video quality preference updated', {detail:$('call-quality').selectedOptions[0].textContent});});
 new ResizeObserver(()=>{if(active)arrangeVideos();}).observe($('videos'));
 
