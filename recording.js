@@ -25,10 +25,26 @@ const recordingMemory=new Map();
 let recordingURLs=[];
 function recordingDuration(ms) {const s=Math.floor(ms/1000);return [Math.floor(s/3600),Math.floor(s/60)%60,s%60].map(v=>String(v).padStart(2,'0')).join(':');}
 function recordingCapability() {return !!(window.MediaRecorder&&HTMLCanvasElement.prototype.captureStream&&(window.AudioContext||window.webkitAudioContext)&&window.indexedDB);}
+const RECORDING_FORMATS={mp4:['video/mp4;codecs=avc1.42E028,mp4a.40.2','video/mp4'],webm:['video/webm;codecs=vp8,opus','video/webm']};
+function recordingMime(format) {
+  return window.MediaRecorder&&RECORDING_FORMATS[format]?.find(type=>MediaRecorder.isTypeSupported(type))||'';
+}
+function recordingFormatControls() {
+  const select=$('recording-format');
+  $('recording-format-settings').hidden=!active||!isHost;
+  for(const option of select.options)option.disabled=!recordingMime(option.value);
+  if(!recordingMime(select.value))select.value=[...select.options].find(option=>!option.disabled)?.value||'';
+  select.disabled=recordingPreparing||!!weddingRecording||!recordingMime(select.value);
+  $('recording-format-help').textContent=!recordingMime('mp4')
+    ? 'MP4 recording is unavailable in this browser. WebM will be used when supported.'
+    : select.value==='mp4'?'MP4 keeps its starting resolution and automatically adjusts frame rate. WebM can also change resolution during recording.'
+    : 'WebM automatically adjusts resolution and frame rate during recording.';
+}
 function recordingControls() {
+  recordingFormatControls();
   const button=$('record-toggle');
   button.hidden=!active||!isHost;
-  button.disabled=recordingPreparing||!!weddingRecording?.stopping||!recordingCapability();
+  button.disabled=recordingPreparing||!!weddingRecording?.stopping||!recordingCapability()||!recordingMime($('recording-format').value);
   const label=recordingPreparing?'Preparing…':weddingRecording?.stopping?'Saving…':weddingRecording?'Stop recording':'Record all';
   if(button.querySelector('.button-label')?.textContent!==label)buttonLabel('record-toggle',label);
   button.setAttribute('aria-pressed',String(!!weddingRecording&&!weddingRecording.stopping));
@@ -286,7 +302,7 @@ async function startWeddingRecording() {
   try{
     // Audio resume is initiated in the recording button's user gesture.
     audio=new (window.AudioContext||window.webkitAudioContext)({latencyHint:'playback'});const resumed=audio.resume();
-    const mime=['video/webm;codecs=vp8,opus','video/webm','video/mp4;codecs=avc1.42E028,mp4a.40.2','video/mp4'].find(type=>MediaRecorder.isTypeSupported(type));
+    const mime=recordingMime($('recording-format').value);
     if(!mime)throw new Error('No supported recording format.');
     const extension=mime.includes('mp4')?'mp4':'webm',filename='Our-Wedding-'+new Date().toISOString().replace(/[:.]/g,'-')+'.'+extension;
     if(typeof window.showSaveFilePicker==='function'){
@@ -327,7 +343,7 @@ async function startWeddingRecording() {
     session.syncTimer=setInterval(()=>{try{syncRecordingAudio(session);refreshRecordingScene(session);syncRecordingVideoTracks(session);adaptRecordingQuality();}catch{}recordingControls();},1000);
     broadcast({type:'recording',...recordingState()});
     for(const input of recordingSources())input.video?.play().catch(()=>{});
-    notify('Recording everyone — Auto quality',{detail:writer?'Saving to your selected file, with a browser backup.':'Saving in this browser. Stop recording to download your video.',kind:'info',duration:6500});
+    notify('Recording everyone — '+extension.toUpperCase()+' · Auto quality',{detail:writer?'Saving to your selected file, with a browser backup.':'Saving in this browser. Stop recording to download your video.',kind:'info',duration:6500});
   }catch(error){
     if(session){releaseRecordingRenderer(session);session.videoStream.getTracks().forEach(t=>t.stop());session.destination.stream.getTracks().forEach(t=>t.stop());}
     await writer?.abort().catch(()=>{});await audio?.close().catch(()=>{});
@@ -385,7 +401,7 @@ async function refreshRecordingLibrary() {
       const body=document.createElement('div'),title=document.createElement('strong'),info=document.createElement('p'),button=document.createElement('button');
       title.textContent=new Date(meta.startedAt).toLocaleString();
       const incomplete=meta.state!=='complete',inProgress=meta.id===weddingRecording?.meta.id&&!weddingRecording.finalizedData;
-      info.textContent=recordingDuration(meta.durationMs)+(meta.qualityHistory?.length?' · Auto '+[...new Set(meta.qualityHistory.map(p=>p.height+'p'))].join(' → '):meta.recordingWidth?' · '+meta.recordingWidth+'×'+meta.recordingHeight:'')+' · '+(meta.bytes/1048576).toFixed(1)+' MB · '+(inProgress?'Recording now':meta.savedToFile?'Saved to selected file':incomplete?'Interrupted — recover saved footage':'Saved in this browser');
+      info.textContent=recordingDuration(meta.durationMs)+' · '+(meta.mime?.includes('mp4')?'MP4':'WebM')+(meta.qualityHistory?.length?' · Auto '+[...new Set(meta.qualityHistory.map(p=>p.height+'p'))].join(' → '):meta.recordingWidth?' · '+meta.recordingWidth+'×'+meta.recordingHeight:'')+' · '+(meta.bytes/1048576).toFixed(1)+' MB · '+(inProgress?'Recording now':meta.savedToFile?'Saved to selected file':incomplete?'Interrupted — recover saved footage':'Saved in this browser');
       body.append(title,info);if(meta.note){const note=document.createElement('p');note.textContent=meta.note;body.append(note);}button.type='button';button.textContent=inProgress?'Recording…':incomplete?'Recover video':'Download video';
       button.disabled=!meta.bytes||(meta.id===weddingRecording?.meta.id&&!weddingRecording.finalizedData);
       if(meta.backupIncomplete&&meta.savedToFile&&!recordingMemory.get(meta.id)?.tail.length){button.disabled=true;button.textContent='Use saved file';}
@@ -401,6 +417,7 @@ function showRecordingLibrary() {
   void refreshRecordingLibrary();if(!dialog.open)dialog.showModal();
 }
 $('record-toggle').addEventListener('click',()=>{if(weddingRecording)void stopWeddingRecording();else void startWeddingRecording();});
+$('recording-format').addEventListener('change',()=>{recordingFormatControls();notify('Recording format updated',{detail:$('recording-format').value.toUpperCase()+' · applies to your next recording'});});
 $('open-recordings').addEventListener('click',showRecordingLibrary);
 $('close-recordings').addEventListener('click',()=>$('recordings-dialog').close());
 $('recordings-dialog').addEventListener('keydown',event=>{if(event.key==='Escape')event.stopPropagation();});

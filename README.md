@@ -14,12 +14,14 @@ Auto starts conservatively for larger rooms and less capable devices: four/five 
 
 Recording follows live quality and has its own frame-delivery/device-load monitor. Its gallery output can use 1080p/24 fps, 720p/20 fps, 540p/15 fps, 360p/12 fps, or 240p/10 fps. Sustained recording pressure lowers the tier; recovery is gradual. Recording can recover up to its starting tier because the browser's encoder bitrate is chosen when recording starts. The REC badge shows the current recording target.
 
-WebM/VP8 with Opus audio is preferred so resolution can change **within one continuous file**. The MP4 compatibility path keeps its initial encoded dimensions and reduces frame rate instead. Player support for files with changing dimensions varies; check the finished file in a current browser or compatible player.
+**MP4 is the default recording format when supported.** It uses H.264/AAC and saves a real .mp4 file. Choose **More → Recording format** before starting a recording. MP4 keeps its starting resolution and automatically reduces frame rate when needed; the live call still adapts resolution, bitrate, and frame rate.
+
+**WebM · adaptive resolution** remains available for continuous resolution changes within one file, using VP8/Opus. If the browser cannot record MP4, the menu disables MP4, selects WebM, and explains the fallback. Format selection is locked during recording. Player support for changing dimensions varies; check the finished file in a compatible player. Existing WebM recordings remain WebM; changing the setting affects new recordings only.
 
 ## Recording your wedding
 
 1. Start the room on the laptop that will save your memories.
-2. Click **Record all**. Choose a filename/location if the browser offers a Save dialog. Cancelling cancels recording. Otherwise, footage is kept in browser storage until downloaded.
+2. MP4 is selected by default where available. To change the format, use **More → Recording format**, then click **Record all**. Choose a filename/location if the browser offers a Save dialog. Cancelling cancels recording. Otherwise, footage is kept in browser storage until downloaded.
 3. Guests receive a recording notice and see REC. The host records a gallery of everyone, their microphone, and audio received from participants. Focus view, chat, and controls do not change the recorded gallery.
 4. Click **Stop recording** and wait for saving. The selected file is finalized, or the recordings library offers **Download video**. The More menu also opens the library. Leaving the room stops and finalizes recording while the page remains open.
 5. Download, play back, and keep a separate copy of your wedding memory.
@@ -60,6 +62,8 @@ The free call is a peer-to-peer mesh: each device sends to every other device. A
 Use a powered laptop for recording, keep the tab foregrounded and the device awake, and rehearse on the actual devices and international connections. Automatic reduction helps with overload; it cannot guarantee zero lag or restore footage that never arrived.
 
 ## Verification
+
+The MP4 update downloaded a real MP4 file and played it to the end at 1920×1080 with both synthetic cameras and both audio test tones. Automatic frame-rate targets changed 24 → 20 → 15 → 20 without interrupting the file. Format selection, its recording-time lock, the mobile menu, guest visibility, and automatic WebM fallback when MP4 support was disabled were checked. The fallback WebM also retained working resolution changes and audio playback.
 
 The Auto update was checked with real local WebRTC delivery, including 1080p → 720p → 480p reduction and recovery, bitrate changes, and injected encoder-pressure statistics. Continuous worker and compatibility-renderer recordings played to the end through 1080p → 720p → 540p → 720p, preserving both synthetic camera images and both audio test tones. The recording governor reduced quality after sustained frame-delivery pressure and recovered after healthy samples. Camera-off privacy, original-track cleanup, and fullscreen recording controls passed.
 
