@@ -30,13 +30,18 @@ async function copyInviteValue(value,input,success) {
 }
 function applyRoomCode() {
   if(active||busy)return;
-  const code=normaliseRoomCode($('join-room-code').value);
-  if(!code){status('Enter the room code exactly as shown on the host’s invitation.',true);$('join-room-code').focus();return;}
+  const code=roomCodeFromInvite($('join-room-code').value);
+  if(!code){status('Enter a room code or paste an invitation link from this wedding website.',true);$('join-room-code').focus();return;}
   location.hash=code;lobby();status('Room code ready. Enter your name and join your family.');
   ($('display-name').value.trim()?$('join'):$('display-name')).focus();
 }
 $('use-room-code').addEventListener('click',applyRoomCode);
 $('join-room-code').addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();applyRoomCode();}});
+$('paste-invitation').addEventListener('click',async()=>{
+  if(active||busy)return;
+  try{const text=await navigator.clipboard.readText();if(active||busy)return;$('join-room-code').value=text;applyRoomCode();}
+  catch{$('join-room-code').focus();status('Paste your invitation link or room code into the field, then select Use invite.');}
+});
 $('clear-room-code').addEventListener('click',()=>{if(active||busy)return;history.replaceState(null,'',location.pathname+location.search);lobby();status('Ready to start a new wedding room.');});
 $('close-invite').addEventListener('click',()=>$('invite-dialog').close());
 $('invite-dialog').addEventListener('keydown',event=>{if(event.key==='Escape')event.stopPropagation();});

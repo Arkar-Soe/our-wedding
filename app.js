@@ -211,6 +211,19 @@ function makeRoomLink(code) {
   if(/^https?:$/.test(url.protocol)){url.search='';url.pathname=url.pathname.replace(/\/index\.html$/i,'/');}
   url.hash=code.length===48?new URLSearchParams({room:code}).toString():code;return url.href;
 }
+function roomCodeFromInvite(value) {
+  const text=String(value||'').trim(),direct=normaliseRoomCode(text);if(direct)return direct;
+  let hash=text;
+  if(!text.startsWith('#')){
+    try{
+      const url=new URL(text),path=p=>p.replace(/\/index\.html$/i,'/').replace(/\/$/,'');
+      if(!/^https?:$/.test(url.protocol)||url.origin!==location.origin||path(url.pathname)!==path(location.pathname))return '';
+      hash=url.hash;
+    }catch{return '';}
+  }
+  const raw=hash.slice(1),legacy=new URLSearchParams(raw).get('room');
+  try{return normaliseRoomCode(legacy===null?decodeURIComponent(raw):legacy);}catch{return '';}
+}
 function lobby() {
   $('join').textContent = invitation() ? 'Join our wedding call ↗' : 'Start our wedding call ↗';
   $('join-hint').textContent = invitation() ? 'Your family has saved you a seat. Join when you’re ready.' : 'Start a room, then send the invitation link to your families.';
@@ -408,8 +421,8 @@ function joinHost(generation) {
 async function start() {
   if (busy || active) return;
   const entered=$('join-room-code').value.trim();
-  if(entered&&!normaliseRoomCode(entered)){$('join-room-code').focus();status('Check the room code shown on the host’s invitation.',true);return;}
-  if(entered&&normaliseRoomCode(entered)!==invitation())location.hash=normaliseRoomCode(entered);
+  if(entered&&!roomCodeFromInvite(entered)){$('join-room-code').focus();status('Enter a room code or paste an invitation link from this wedding website.',true);return;}
+  if(entered&&roomCodeFromInvite(entered)!==invitation())location.hash=roomCodeFromInvite(entered);
   if (!$('display-name').value.trim()) {$('display-name').focus(); status('Please enter your name so your family knows who is joining.', true); return;}
   if (!window.Peer) {status('The calling library did not load. Check your connection and reload the page.', true); return;}
   ownName = cleanName($('display-name').value); busy = true; $('join').disabled = true; $('preview-button').disabled = true;
