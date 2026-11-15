@@ -1,0 +1,21 @@
+Our Wedding Call — bundled third-party components
+
+Project Nayuki QR Code generator library
+Website and source: https://www.nayuki.io/page/qr-code-generator-library
+License: MIT, preserved in qrcodegen.js.
+
+jsQR, by the jsQR contributors
+Source: https://github.com/cozmo/jsQR
+License: Apache 2.0, supplied in jsqr-LICENSE.txt.
+Packaging change: an attribution header was added to jsqr.js; decoder code is unchanged.
+
+Mediabunny 1.66.0, by Vanilagy and contributors
+Repository: https://github.com/Vanilagy/mediabunny
+Complete corresponding source distribution (includes package/src/ TypeScript files):
+https://registry.npmjs.org/mediabunny/-/mediabunny-1.66.0.tgz
+License: Mozilla Public License 2.0, supplied in mediabunny-LICENSE.txt.
+The unmodified package/dist/bundles/mediabunny.min.cjs browser distribution is
+included as mediabunny.js. Only its filename has changed for static hosting.
+The MPL-covered source remains available under MPL 2.0 at the link above.
+Downloaded npm archive integrity:
+sha512-0Zff/qLkY1ZRyjBEt2vQjLeMigmU/dFKwJLpiPyCiskIel2f2R2kqMxaLYbeHN+rmyz4PVwwLSnU9anjUHHeJQ==
