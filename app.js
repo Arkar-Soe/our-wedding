@@ -226,7 +226,7 @@ function roomCodeFromInvite(value) {
 }
 function lobby() {
   $('join').textContent = invitation() ? 'Join our wedding call ↗' : 'Start our wedding call ↗';
-  $('join-hint').textContent = invitation() ? 'Your family has saved you a seat. Join when you’re ready.' : 'Start a room, then send the invitation link to your families.';
+  $('join-hint').textContent = invitation() ? 'Your invitation is ready.' : 'Start a room and invite your family.';
   $('join-room-code').value=formatRoomCode(invitation());$('clear-room-code').hidden=!invitation();
 }
 function stopMedia() {

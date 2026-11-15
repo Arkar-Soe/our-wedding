@@ -15,7 +15,7 @@ function indexedRecordingBlob(chunks,mime) {
 }
 function timelineProgressUI() {
   const job=recordingTimelineJob;$('timeline-progress').hidden=!job;$('timeline-cancel').hidden=!job;
-  if(job){$('timeline-progress').value=job.progress;$('timeline-status').textContent='Preparing video timeline… '+Math.round(job.progress*100)+'%';}
+  if(job){$('timeline-tools').open=true;$('timeline-progress').value=job.progress;$('timeline-status').textContent='Preparing video timeline… '+Math.round(job.progress*100)+'%';}
   $('repair-recording-file').disabled=!!job||!!weddingRecording||recordingPreparing;
 }
 async function buildRecordingTimeline(blob,mime,{chunkSize,onProgress}={}) {
@@ -43,6 +43,7 @@ async function buildRecordingTimeline(blob,mime,{chunkSize,onProgress}={}) {
 async function persistTimelineMetadata(meta,result) {
   const next={...meta,timelineKey:result.key,timelineVersion:1,timelineState:'ready',bytes:result.size,durationMs:result.durationMs,backupIncomplete:false,fileTimelineReady:meta.savedToFile?false:meta.fileTimelineReady,timelineNote:''};
   await RecordingArchive.putSession(next);Object.assign(meta,next);recordingMemory.set(meta.id,{meta:{...meta},tail:[]});
+  broadcastRecordingChange(meta.id);
 }
 async function finishSessionTimeline(session) {
   let source,result,committed=false;
@@ -65,7 +66,8 @@ async function finishSessionTimeline(session) {
     }
   }catch(error){if(!committed){if(result?.key)try{await RecordingArchive.deleteChunks(result.key);}catch{}session.meta.timelineState='pending';}session.meta.timelineNote=error.name==='AbortError'?'Timeline preparation was cancelled. The original footage was kept.':'Timeline preparation could not finish. The original footage was kept. '+error.message;}
 }
-async function fixSavedRecordingTimeline(id) {
+async function fixSavedRecordingTimeline(id,locked=false) {
+  if(!locked)return withRecordingLock(id,()=>fixSavedRecordingTimeline(id,true)).catch(error=>{libraryFeedback(error.message,true);});
   if(weddingRecording||recordingPreparing||recordingTimelineJob)return;
   let result,committed=false;
   try{

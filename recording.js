@@ -38,12 +38,13 @@ function recordingFormatControls() {
   if(!recordingMime(select.value))select.value=[...select.options].find(option=>!option.disabled)?.value||'';
   select.disabled=recordingPreparing||!!weddingRecording||!recordingMime(select.value);
   $('recording-format-help').textContent=!recordingMime('mp4')
-    ? 'MP4 recording is unavailable in this browser. WebM will be used when supported.'
-    : select.value==='mp4'?'MP4 keeps its starting resolution and automatically adjusts frame rate. WebM can also change resolution during recording.'
-    : 'WebM automatically adjusts resolution and frame rate during recording.';
+    ? 'MP4 unavailable. WebM will be used.'
+    : select.value==='mp4'?'MP4 adjusts frame rate. WebM can also adjust resolution.'
+    : 'WebM adjusts resolution and frame rate automatically.';
 }
 function recordingControls() {
   recordingFormatControls();
+  if(typeof syncLibraryControls==='function')syncLibraryControls();
   if(typeof timelineProgressUI==='function')timelineProgressUI();
   document.querySelectorAll('.fix-timeline').forEach(button=>{button.disabled=!!weddingRecording||!!recordingTimelineJob;});
   const button=$('record-toggle');
@@ -291,7 +292,7 @@ async function persistRecordingChunk(session,blob) {
     // Do not retain an entire long ceremony in RAM if browser backup storage fills.
     if(!backedUp&&!fileWritten)session.tail.push({index,blob});
     if(!backedUp&&fileWritten&&!session.backupNotice){session.backupNotice=true;notify('Browser backup storage is full',{detail:'Recording continues in your selected file.',kind:'info',duration:6500});}
-    session.meta.bytes+=blob.size;session.meta.durationMs=performance.now()-session.startedClock;
+    session.meta.lastActiveAt=Date.now();session.meta.bytes+=blob.size;session.meta.durationMs=performance.now()-session.startedClock;
     recordingMemory.set(session.meta.id,{meta:{...session.meta},tail:session.tail});
     try{await RecordingArchive.putSession({...session.meta});}catch{}
     if(!backedUp&&!session.writer){session.problem='Browser storage filled or became unavailable. Recording stopped; download the recovered footage now.';void stopWeddingRecording();}
@@ -341,6 +342,7 @@ async function startWeddingRecording() {
     recorder.ondataavailable=event=>{if(event.data.size)void persistRecordingChunk(session,event.data);};
     recorder.onerror=()=>{session.problem='The browser interrupted recording. Recover the saved footage below.';void stopWeddingRecording();};
     recorder.onstop=()=>{void finishWeddingRecording(session);};
+    await holdRecordingLease(session);
     await initializeRecordingRenderer(session);
     syncRecordingAudio(session);refreshRecordingScene(session);drawWeddingRecording(session);
     if(!active||epoch!==generation)throw new DOMException('Call ended','AbortError');
@@ -351,6 +353,7 @@ async function startWeddingRecording() {
     for(const input of recordingSources())input.video?.play().catch(()=>{});
     notify('Recording everyone — '+extension.toUpperCase()+' · Auto quality',{detail:writer?'Saving to your selected file, with a browser backup.':'Saving in this browser. Stop recording to download your video.',kind:'info',duration:6500});
   }catch(error){
+    session?.releaseLibraryLease?.();
     if(session){releaseRecordingRenderer(session);session.videoStream.getTracks().forEach(t=>t.stop());session.destination.stream.getTracks().forEach(t=>t.stop());}
     await writer?.abort().catch(()=>{});await audio?.close().catch(()=>{});
     if(error.name!=='AbortError')notify('Recording could not start',{detail:'Check available storage and use desktop Chrome or Edge. '+error.message,kind:'error',duration:7000});
@@ -385,7 +388,7 @@ async function finishWeddingRecording(session) {
   else notify(session.meta.savedToFile?'Seekable recording saved to your file':'Seekable recording saved in this browser',{detail:session.meta.savedToFile?'The video timeline is ready.':'Download your video from Wedding recordings.',duration:6500});
   if(!session.meta.savedToFile||session.problem||session.meta.timelineNote)showRecordingLibrary();
   if(weddingRecording===session)weddingRecording=null;
-  recordingControls();session.finish(session.meta);
+  recordingControls();session.finish(session.meta);session.releaseLibraryLease?.();broadcastRecordingChange(session.meta.id);
 }
 async function recordingBlob(id) {
   const saved=await RecordingArchive.sessions().catch(()=>[]),memory=recordingMemory.get(id),meta=memory?.meta||saved.find(s=>s.id===id);
@@ -398,33 +401,10 @@ async function recordingBlob(id) {
   return {meta,blob:new Blob([...byIndex].sort((a,b)=>a[0]-b[0]).map(([,blob])=>blob),{type:meta.mime})};
 }
 async function downloadRecording(id) {
-  try{const {meta,blob}=await recordingBlob(id),url=URL.createObjectURL(blob),a=document.createElement('a');recordingURLs.push(url);a.href=url;a.download=meta.filename;document.body.append(a);a.click();a.remove();setTimeout(()=>{URL.revokeObjectURL(url);recordingURLs=recordingURLs.filter(u=>u!==url);},60000);notify('Recording download started',{detail:'Keep your downloaded video somewhere safe.'});}
-  catch(error){notify('Could not download this recording',{detail:error.message,kind:'error',duration:7000});}
+  try{const {meta,blob}=await recordingBlob(id),url=URL.createObjectURL(blob),a=document.createElement('a');recordingURLs.push(url);a.href=url;a.download=meta.filename;document.body.append(a);a.click();a.remove();setTimeout(()=>{URL.revokeObjectURL(url);recordingURLs=recordingURLs.filter(u=>u!==url);},60000);if($('recordings-dialog').open)libraryFeedback('Download started.');else notify('Recording download started');}
+  catch(error){if($('recordings-dialog').open)libraryFeedback(error.message,true);else notify('Could not download this recording',{detail:error.message,kind:'error',duration:7000});}
 }
-async function refreshRecordingLibrary() {
-  let saved=[];try{saved=await RecordingArchive.sessions();}catch{}
-  const all=new Map(saved.map(meta=>[meta.id,meta]));for(const [id,entry] of recordingMemory)all.set(id,entry.meta);
-  const rows=[...all.values()].filter(meta=>meta.bytes>0||meta.state==='interrupted'||meta.id===weddingRecording?.meta.id).sort((a,b)=>b.startedAt-a.startedAt);
-  $('recordings-section').hidden=!rows.length;
-  for(const target of [$('recordings-list'),$('recordings-modal-list')]){
-    target.replaceChildren();
-    for(const meta of rows){
-      const row=document.createElement('div');row.className='recording-row';
-      const body=document.createElement('div'),title=document.createElement('strong'),info=document.createElement('p'),button=document.createElement('button');
-      title.textContent=new Date(meta.startedAt).toLocaleString();
-      const incomplete=meta.state!=='complete',inProgress=meta.id===weddingRecording?.meta.id&&!weddingRecording.finalizedData;
-      info.textContent=recordingDuration(meta.durationMs)+' · '+(meta.mime?.includes('mp4')?'MP4':'WebM')+(meta.qualityHistory?.length?' · Auto '+[...new Set(meta.qualityHistory.map(p=>p.height+'p'))].join(' → '):meta.recordingWidth?' · '+meta.recordingWidth+'×'+meta.recordingHeight:'')+' · '+(meta.bytes/1048576).toFixed(1)+' MB · '+(meta.timelineState==='ready'?'Seekable · ':'')+(inProgress?'Recording now':meta.savedToFile?(meta.fileTimelineReady===false&&meta.timelineState==='ready'?'Seekable copy in this browser':'Saved to selected file'):incomplete?'Interrupted — recover saved footage':'Saved in this browser');
-      body.append(title,info);if(meta.note){const note=document.createElement('p');note.textContent=meta.note;body.append(note);}button.type='button';button.textContent=inProgress?'Recording…':incomplete?'Recover video':'Download video';
-      button.disabled=!meta.bytes||(meta.id===weddingRecording?.meta.id&&!weddingRecording.finalizedData);
-      if(meta.backupIncomplete&&meta.savedToFile&&!recordingMemory.get(meta.id)?.tail.length){button.disabled=true;button.textContent='Use saved file';}
-      button.addEventListener('click',()=>{button.disabled=true;void downloadRecording(meta.id).finally(()=>{button.disabled=false;});});
-      const actions=document.createElement('div');actions.className='recording-actions';actions.append(button);
-      if(meta.timelineState!=='ready'&&!inProgress&&meta.bytes){const fix=document.createElement('button');fix.type='button';fix.className='fix-timeline';fix.textContent='Fix timeline';fix.disabled=!!weddingRecording||!!recordingTimelineJob;fix.addEventListener('click',()=>{void fixSavedRecordingTimeline(meta.id);});actions.append(fix);}
-      row.append(body,actions);target.append(row);
-    }
-    if(!rows.length){const p=document.createElement('p');p.className='fine-print';p.textContent='Recordings saved on this device will appear here.';target.append(p);}
-  }
-}
+async function refreshRecordingLibrary() {return renderRecordingLibrary();}
 function showRecordingLibrary() {
   toggleCameraMenu(false);
   const dialog=$('recordings-dialog'),target=$('call-stage').classList.contains('full-view')?$('call-stage'):document.body;
@@ -435,6 +415,5 @@ $('record-toggle').addEventListener('click',()=>{if(weddingRecording)void stopWe
 $('recording-format').addEventListener('change',()=>{recordingFormatControls();notify('Recording format updated',{detail:$('recording-format').value.toUpperCase()+' · applies to your next recording'});});
 $('open-recordings').addEventListener('click',showRecordingLibrary);
 $('close-recordings').addEventListener('click',()=>$('recordings-dialog').close());
-$('recordings-dialog').addEventListener('keydown',event=>{if(event.key==='Escape')event.stopPropagation();});
+$('recordings-dialog').addEventListener('keydown',event=>{event.stopPropagation();});
 window.addEventListener('beforeunload',event=>{if(weddingRecording||recordingPreparing||recordingTimelineJob){event.preventDefault();event.returnValue='';}});
-void refreshRecordingLibrary();
