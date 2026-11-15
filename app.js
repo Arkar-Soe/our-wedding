@@ -11,7 +11,7 @@ const autoQuality={level:0,bad:0,good:0,roomCeiling:1080,timer:null,probe:null,b
 let stream, peer, hostConnection, token, ownName, selfId, hostId, roomLink;
 let active = false, busy = false, isHost = false, epoch = 0, roster = [], ticker, repair;
 let selectedVideo = null;
-let noticeTimer = null, inviteLabelTimer = null;
+let noticeTimer = null;
 function placeNotifications() {
   const region = $('notification-region');
   const target = $('call-stage').classList.contains('full-view') ? $('call-stage') : document.body;
@@ -44,7 +44,7 @@ function setCallChrome(visible) {
 }
 function scheduleChromeHide() {
   clearTimeout(chromeTimer);
-  if ($('call-stage').classList.contains('full-view') && $('camera-menu').hidden && !openPanel && !chromePointerInside) {
+  if ($('call-stage').classList.contains('full-view') && $('camera-menu').hidden && !$('invite-dialog').open && !openPanel && !chromePointerInside) {
     chromeTimer = setTimeout(() => setCallChrome(false), 3000);
   }
 }
@@ -194,10 +194,27 @@ async function exitStage() {
 }
 const status = (text, error = false) => { $('status').textContent = text; $('status').classList.toggle('error', error); if (error) notify(text, {kind:'error',duration:6500}); };
 const cleanName = value => typeof value === 'string' ? value.trim().slice(0, 40) || 'Family' : 'Family';
-function invitation() { const v = new URLSearchParams(location.hash.slice(1)).get('room'); return /^[a-f0-9]{48}$/.test(v || '') ? v : ''; }
+const ROOM_CODE_ALPHABET='23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+function normaliseRoomCode(value) {
+  const compact=String(value||'').trim().replace(/[\s-]/g,'');
+  if(/^[a-f0-9]{48}$/i.test(compact))return compact.toLowerCase();
+  const code=compact.toUpperCase();return /^[2-9A-HJ-NP-Z]{12}$/.test(code)?code:'';
+}
+function createRoomCode() {return [...crypto.getRandomValues(new Uint8Array(12))].map(n=>ROOM_CODE_ALPHABET[n&31]).join('');}
+function formatRoomCode(code) {return code.length===12?code.match(/.{4}/g).join(' '):code;}
+function invitation() {
+  const hash=location.hash.slice(1),legacy=new URLSearchParams(hash).get('room');
+  return normaliseRoomCode(legacy===null?hash:legacy);
+}
+function makeRoomLink(code) {
+  const url=new URL(location.href);
+  if(/^https?:$/.test(url.protocol)){url.search='';url.pathname=url.pathname.replace(/\/index\.html$/i,'/');}
+  url.hash=code.length===48?new URLSearchParams({room:code}).toString():code;return url.href;
+}
 function lobby() {
   $('join').textContent = invitation() ? 'Join our wedding call ↗' : 'Start our wedding call ↗';
   $('join-hint').textContent = invitation() ? 'Your family has saved you a seat. Join when you’re ready.' : 'Start a room, then send the invitation link to your families.';
+  $('join-room-code').value=formatRoomCode(invitation());$('clear-room-code').hidden=!invitation();
 }
 function stopMedia() {
   stream?.getTracks().forEach(t => t.stop()); stream = null;
@@ -390,6 +407,9 @@ function joinHost(generation) {
 }
 async function start() {
   if (busy || active) return;
+  const entered=$('join-room-code').value.trim();
+  if(entered&&!normaliseRoomCode(entered)){$('join-room-code').focus();status('Check the room code shown on the host’s invitation.',true);return;}
+  if(entered&&normaliseRoomCode(entered)!==invitation())location.hash=normaliseRoomCode(entered);
   if (!$('display-name').value.trim()) {$('display-name').focus(); status('Please enter your name so your family knows who is joining.', true); return;}
   if (!window.Peer) {status('The calling library did not load. Check your connection and reload the page.', true); return;}
   ownName = cleanName($('display-name').value); busy = true; $('join').disabled = true; $('preview-button').disabled = true;
@@ -397,10 +417,10 @@ async function start() {
   try {
     status('Opening your microphone and selected camera…'); await capture();
     token = invitation(); isHost = !token;
-    if (isHost) token = [...crypto.getRandomValues(new Uint8Array(24))].map(n => n.toString(16).padStart(2,'0')).join('');
+    if (isHost) token = createRoomCode();
     const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
     hostId = 'nikah-' + [...new Uint8Array(digest)].map(n => n.toString(16).padStart(2,'0')).join('');
-    const url = new URL(location.href); url.hash = new URLSearchParams({room: token}).toString(); roomLink = url.href;
+    roomLink = makeRoomLink(token);
     const options = {config: {iceServers: [{urls:'stun:stun.l.google.com:19302'}]}, debug: 0};
     peer = isHost ? new Peer(hostId, options) : new Peer(options); status('Connecting to the wedding room…');
     const deadline = setTimeout(() => {if (generation === epoch && busy) end('The signaling service did not respond. Check your internet connection and retry.', true);},35000);
@@ -426,6 +446,7 @@ async function start() {
   } catch (e) {end(mediaError(e),true);} finally {$('preview-button').disabled = busy;}
 }
 function end(reason = 'You’ve left the call. Thank you for being part of our beginning.', error = false) {
+  $('invite-dialog').close();
   void stopWeddingRecording(); resetAutoQuality(); remoteRecording = false;
   setPanel(null); toggleCameraMenu(false); clearTimeout(chromeTimer); chromePointerInside = false; suppressRevealClickUntil = 0;
   void exitStage(); document.body.classList.remove('in-call'); selectedVideo = null;
@@ -441,7 +462,7 @@ $('join').addEventListener('click', start);
 $('more-options').addEventListener('click', () => toggleCameraMenu($('camera-menu').hidden));
 $('close-camera-menu').addEventListener('click', () => toggleCameraMenu(false, true));
 $('call-stage').addEventListener('pointerdown', event => {
-  if (event.target.closest('#notification-region, #recordings-dialog')) {suppressRevealClickUntil = 0; return;}
+  if (event.target.closest('#notification-region, #recordings-dialog, #invite-dialog')) {suppressRevealClickUntil = 0; return;}
   if (!$('call-stage').classList.contains('chrome-hidden')) suppressRevealClickUntil = 0;
   if (event.pointerType === 'touch') chromePointerInside = false;
   if ($('call-stage').classList.contains('chrome-hidden')) {
@@ -521,18 +542,7 @@ $('toggle-video').addEventListener('click', () => {
 });
 $('leave').addEventListener('click', () => end());
 $('play-audio').addEventListener('click', async () => {const r = await Promise.allSettled([...tiles.values()].map(t => t.querySelector('video').play())); $('play-audio').hidden = r.every(v => v.status === 'fulfilled');});
-$('copy-link').addEventListener('click', async () => {
-  clearTimeout(inviteLabelTimer);
-  try {
-    await navigator.clipboard.writeText(roomLink);
-    buttonLabel('copy-link','Copied!');
-    notify('Invitation link copied', {detail:'Send it privately to your family.'});
-    inviteLabelTimer = setTimeout(()=>buttonLabel('copy-link','Invite'),2200);
-  } catch {
-    buttonLabel('copy-link','Invite');
-    notify('Copy the invitation manually', {kind:'info',detail:'Automatic copying is unavailable. Select this link and copy it.',manualLink:roomLink,duration:0});
-  }
-});
+$('copy-link').addEventListener('click', () => showInviteDialog());
 $('chat-form').addEventListener('submit', e => {
   e.preventDefault(); const text = $('chat-input').value.trim().slice(0,1000); if (!active || !text) return;
   if (isHost) {message(ownName,text); broadcast({type:'chat',author:ownName,text});}

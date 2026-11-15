@@ -1,8 +1,20 @@
 # Our Wedding Call — Auto quality
 
-Phyo Arkar Soe & Myat Thu Thu Ko · Updated 11 November 2026.
+Phyo Arkar Soe & Myat Thu Thu Ko · Updated 15 November 2026.
 
 A free, custom wedding meeting for up to eight devices, with gallery/focus views, camera switching, voice, chat, private invitations, and local recording. **Auto is now the default for live video and saved recordings.**
+
+## QR invitations and shorter links
+
+Select **Invite** in the call to display the QR card. On the other phone, open its camera, scan the code, and open the invitation. Enter a name and select **Join our wedding call**. The host keeps the room open during this process.
+
+When scanning is inconvenient, open the same website on the other device, enter the **room code** in **Have a room code?**, and select **Use code**. Enter your name and join. Lowercase letters, spaces, and hyphens are accepted. **Start a new room instead** clears a guest invitation when you want to host a separate call.
+
+New rooms use a cryptographically random 12-character code, shown in three groups of four for reading aloud. The alphabet excludes 0, 1, I, and O. The invitation URL uses only `#` plus the compact code rather than `#room=` plus a 48-character token. Unused query parameters and a trailing `index.html` are removed from hosted invitation URLs. The domain and hosting path remain the same; this build does not use a third-party link shortener. Existing `#room=` links and their original 48-character tokens remain accepted.
+
+The Invite card includes **Copy link**, **Copy code**, **Save QR image**, and a native **Share invitation** action where available. A blocked clipboard leaves a selectable link and instructions. The QR works in fullscreen; Escape closes its card without closing the fullscreen call.
+
+QR generation runs locally using the bundled `qrcodegen.js` library. Room invitations are not sent to an external QR service. A downloaded QR remains an invitation to that room; share it privately. Calls still need internet and the host online. If the page is opened as a local file, the card explains that a hosted HTTPS website is needed for another device to open the invitation.
 
 ## Automatic quality
 
@@ -51,17 +63,19 @@ The host must keep the room tab open. Leaving/refreshing the host ends the room;
 
 ## Free hosting and connection limits
 
-Upload these five files together: **index.html, app.js, recording.js, styles.css, call-layout.css**. No build step or API key is required. README and preview images are optional.
+Upload these seven files together: **index.html, app.js, recording.js, invite.js, qrcodegen.js, styles.css, call-layout.css**. No build step or API key is required. README and preview images are optional. Keep the MIT copyright/license notice included in `qrcodegen.js`.
 
 For GitHub Pages, upload the files to a public repository, then choose **Settings → Pages → Deploy from a branch**, the default branch and **/(root)**. Open the HTTPS site, start the host room, and privately share its invitation link. The ordinary site URL creates a separate room.
 
-When upgrading, replace all five files and refresh/reopen the call on **every device**. Versioned script URLs help load this update.
+When upgrading, upload all seven files and refresh/reopen the call on **every device**. Versioned script URLs help load this update. Start a new room after upgrading to receive a compact invitation; existing rooms keep their original code.
 
 The free call is a peer-to-peer mesh: each device sends to every other device. Auto reduces demand, but bandwidth still grows with the number of participants. This build uses PeerJS public signaling, Google STUN, jsDelivr for PeerJS, and optional Google Fonts. No TURN relay is configured, so some firewalls/NATs/mobile networks cannot connect directly. There is no paid service, screen sharing, telephone dial-in, persistent chat, or large-audience broadcast configured.
 
 Use a powered laptop for recording, keep the tab foregrounded and the device awake, and rehearse on the actual devices and international connections. Automatic reduction helps with overload; it cannot guarantee zero lag or restore footage that never arrived.
 
 ## Verification
+
+The invitation update decoded the generated QR at original and displayed sizes and decoded the downloaded PNG back to the exact room URL. Typed codes (including lowercase and hyphens), original invitation parsing, link cleanup, clipboard/share feedback, missing-library fallback, mobile layout, and fullscreen Escape behaviour passed. Eight local app instances joined through scanned links and typed codes, established 28 media connections, recorded eight audio inputs, and passed chat, camera switching, admission-limit, and leave/rejoin checks. Public signaling and real phone-camera scanning still require rehearsal on the hosted website.
 
 The MP4 update downloaded a real MP4 file and played it to the end at 1920×1080 with both synthetic cameras and both audio test tones. Automatic frame-rate targets changed 24 → 20 → 15 → 20 without interrupting the file. Format selection, its recording-time lock, the mobile menu, guest visibility, and automatic WebM fallback when MP4 support was disabled were checked. The fallback WebM also retained working resolution changes and audio playback.
 
@@ -73,6 +87,7 @@ These local tests use synthetic cameras and local signaling; actual camera hardw
 
 ## References
 
+- [Project Nayuki QR generator](https://www.nayuki.io/page/qr-code-generator-library) — bundled library under the MIT License, with its license preserved in the source.
 - [PeerJS media connections](https://peerjs.com/client/api/media-connection)
 - [WebRTC statistics](https://www.w3.org/TR/webrtc-stats/)
 - [MediaStream Recording](https://www.w3.org/TR/mediastream-recording/)
